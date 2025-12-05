@@ -1,0 +1,19 @@
+database:
+  dsn: "postgres://myapp:myapp_dev@localhost:5432/myapp?sslmode=disable"
+  schema: "public"
+
+output:
+  directory: "./internal/repository/generated"
+  package: "generated"
+
+tables:
+  products:
+    functions: ["create", "get", "update", "delete", "list", "paginate"]
+
+queries:
+  enabled: true
+  directory: "./internal/repository/queries"
+  files:
+    - "products.sql"
+
+default_functions: "all"

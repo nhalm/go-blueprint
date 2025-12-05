@@ -1,0 +1,64 @@
+run:
+  timeout: 5m
+  skip-dirs:
+    - internal/repository/generated
+
+linters:
+  default: none
+  enable:
+    - govet
+    - unused
+    - misspell
+    - gocritic
+    - revive
+    - gocyclo
+    - ineffassign
+    - unconvert
+    - unparam
+    - wastedassign
+    - prealloc
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+        - opinionated
+      disabled-checks:
+        - commentFormatting
+        - unlambda
+        - whyNoLint
+        - unnamedResult
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    gocyclo:
+      min-complexity: 15
+    unparam:
+      check-exported: false
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
