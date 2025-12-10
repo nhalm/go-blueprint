@@ -33,8 +33,6 @@ volumes:
 ```makefile
 .PHONY: help setup install-tools build run test lint clean db-up db-down migrate-up migrate-down generate swagger
 
-SKIMATIK_VERSION ?= v0.6.3
-
 help:
 	@echo "Available targets:"
 	@echo "  setup          - Complete project setup"
@@ -52,7 +50,7 @@ setup: install-tools generate
 	@echo "Setup complete! Run 'make run' to start."
 
 install-tools:
-	@go install github.com/tempcke/skimatik@$(SKIMATIK_VERSION)
+	@go install github.com/nhalm/skimatik/cmd/skimatik@latest
 	@go install github.com/swaggo/swag/cmd/swag@latest
 	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 

@@ -2,6 +2,18 @@
 
 This document covers database schema design, Skimatik code generation, and migrations.
 
+## Prerequisites
+
+Install the required tools:
+
+```bash
+# Skimatik - generates type-safe repositories from PostgreSQL schemas
+go install github.com/nhalm/skimatik/cmd/skimatik@latest
+
+# pgxkit - PostgreSQL toolkit used by generated code
+go get github.com/nhalm/pgxkit
+```
+
 ## Schema Design Principles
 
 1. **Provider-agnostic**: Use generic column names

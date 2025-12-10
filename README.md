@@ -26,7 +26,7 @@ go mod init github.com/yourorg/myapp
 mkdir -p cmd/myapp/cmd internal/{models,repository,service,api,apperrors,database,id}
 
 # 3. Install tools
-go install github.com/tempcke/skimatik@v0.6.3
+go install github.com/nhalm/skimatik/cmd/skimatik@latest
 go install github.com/swaggo/swag/cmd/swag@latest
 go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
@@ -338,7 +338,7 @@ For detailed documentation on the custom packages used in this blueprint:
 
 | Package | Documentation |
 |---------|---------------|
-| **skimatik** | https://github.com/tempcke/skimatik |
+| **skimatik** | https://github.com/nhalm/skimatik |
 | **pgxkit** | https://github.com/nhalm/pgxkit |
 | **chikit** | https://github.com/nhalm/chikit |
 | **canonlog** | https://github.com/nhalm/canonlog |
