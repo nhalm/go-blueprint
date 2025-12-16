@@ -83,22 +83,78 @@ SELECT id, name, description, active, metadata, created_at, updated_at, deleted_
 FROM products
 WHERE id = $1 AND deleted_at IS NULL;
 
--- name: ListProducts :many
+-- name: ListProducts :paginated
 SELECT id, name, description, active, metadata, created_at, updated_at, deleted_at
 FROM products
 WHERE deleted_at IS NULL
   AND ($1::boolean IS NULL OR active = $1)
-  AND ($3::text IS NULL OR id > $3)
-  AND ($4::text IS NULL OR id < $4)
-ORDER BY id ASC
-LIMIT $2;
+ORDER BY id ASC;
 ```
 
-### Query Naming Conventions
+### Query Type Annotations
 
 - `:one` - Returns a single row (generates `func() (*Row, error)`)
 - `:many` - Returns multiple rows (generates `func() ([]Row, error)`)
+- `:paginated` - Returns multiple rows with bidirectional cursor pagination (generates base and `*Paginated` functions)
 - `:exec` - No return value (generates `func() error`)
+
+The `:paginated` annotation generates two functions:
+1. Base function: Returns all matching rows
+2. Paginated variant: Accepts `PaginationParams` and returns `*PaginationResult[T]`
+
+```go
+// PaginationParams for requesting pages
+type PaginationParams struct {
+    Limit        int    // Max items per page (default: 20, max: 100)
+    NextCursor   string // For forward pagination
+    BeforeCursor string // For backward pagination
+}
+
+// PaginationResult returned by paginated queries
+type PaginationResult[T any] struct {
+    Items        []T
+    HasMore      bool   // More items exist forward
+    HasPrevious  bool   // Items exist backward
+    NextCursor   string // Use for next page
+    BeforeCursor string // Use for previous page
+}
+```
+
+For `:paginated` queries, you must include an `ORDER BY` clause. The sort direction determines cursor comparison:
+- `ORDER BY column ASC` uses `>` for forward, `<` for backward
+- `ORDER BY column DESC` uses `<` for forward, `>` for backward
+
+Example with DESC ordering:
+```sql
+-- name: ListRecentProducts :paginated
+SELECT id, name, created_at FROM products
+WHERE deleted_at IS NULL
+ORDER BY created_at DESC;
+```
+
+Usage:
+```go
+// First page
+result, err := queries.ListRecentProductsPaginated(ctx, generated.PaginationParams{
+    Limit: 20,
+})
+
+// Next page (forward)
+if result.HasMore {
+    nextPage, _ := queries.ListRecentProductsPaginated(ctx, generated.PaginationParams{
+        Limit:      20,
+        NextCursor: result.NextCursor,
+    })
+}
+
+// Previous page (backward)
+if result.HasPrevious {
+    prevPage, _ := queries.ListRecentProductsPaginated(ctx, generated.PaginationParams{
+        Limit:        20,
+        BeforeCursor: result.BeforeCursor,
+    })
+}
+```
 
 ## Migration Workflow
 
@@ -250,52 +306,46 @@ func (r *ProductRepository) Update(ctx context.Context, req *models.UpdateProduc
 }
 
 func (r *ProductRepository) ListWithFilters(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error) {
-    results, err := r.queries.ListProducts(ctx, filter.Active, filter.Limit+1, filter.StartingAfter, filter.EndingBefore)
+    params := generated.PaginationParams{
+        Limit: filter.Limit,
+    }
+    if filter.StartingAfter != nil {
+        params.NextCursor = *filter.StartingAfter
+    }
+    if filter.EndingBefore != nil {
+        params.BeforeCursor = *filter.EndingBefore
+    }
+
+    result, err := r.queries.ListProductsPaginated(ctx, filter.Active, params)
     if err != nil {
         return nil, err
     }
 
-    hasMore := len(results) > filter.Limit
-    if hasMore {
-        results = results[:filter.Limit]
-    }
-
-    products := make([]*models.Product, len(results))
-    for i, result := range results {
+    products := make([]*models.Product, len(result.Items))
+    for i, item := range result.Items {
         var metadata map[string]string
-        if result.Metadata != nil && len(*result.Metadata) > 0 {
-            if err := json.Unmarshal(*result.Metadata, &metadata); err != nil {
+        if item.Metadata != nil && len(*item.Metadata) > 0 {
+            if err := json.Unmarshal(*item.Metadata, &metadata); err != nil {
                 return nil, fmt.Errorf("unmarshal metadata: %w", err)
             }
         }
         products[i] = &models.Product{
-            ID:          result.Id,
-            Name:        result.Name,
-            Description: result.Description,
-            Active:      result.Active,
+            ID:          item.Id,
+            Name:        item.Name,
+            Description: item.Description,
+            Active:      item.Active,
             Metadata:    metadata,
-            CreatedAt:   result.CreatedAt,
-            UpdatedAt:   result.UpdatedAt,
-        }
-    }
-
-    var nextCursor, prevCursor *string
-    if len(products) > 0 {
-        last := products[len(products)-1].ID
-        first := products[0].ID
-        if hasMore {
-            nextCursor = &last
-        }
-        if filter.StartingAfter != nil {
-            prevCursor = &first
+            CreatedAt:   item.CreatedAt,
+            UpdatedAt:   item.UpdatedAt,
         }
     }
 
     return &models.ListProductsResult{
         Products:   products,
-        HasMore:    hasMore,
-        NextCursor: nextCursor,
-        PrevCursor: prevCursor,
+        HasMore:    result.HasMore,
+        HasPrev:    result.HasPrevious,
+        NextCursor: result.NextCursor,
+        PrevCursor: result.BeforeCursor,
     }, nil
 }
 
@@ -329,6 +379,63 @@ func marshalToRawMessage(v any) (*json.RawMessage, error) {
     return &raw, nil
 }
 ```
+
+## Error Handling
+
+The repository layer translates Skimatik's `DatabaseError` into application errors (`apperrors`). This keeps database concerns isolated and provides sanitized error messages.
+
+```go
+// internal/repository/product_repository.go
+
+func translateError(err error) error {
+    if err == nil {
+        return nil
+    }
+
+    var dbErr *generated.DatabaseError
+    errors.As(err, &dbErr)
+
+    switch {
+    case generated.IsNotFound(err):
+        return apperrors.NewNotFoundError(dbErr.Entity, "")
+    case generated.IsAlreadyExists(err):
+        return apperrors.NewConflictError(dbErr.Entity, "already exists")
+    case generated.IsInvalidReference(err):
+        return apperrors.NewConflictError(dbErr.Entity, "referenced resource does not exist")
+    case generated.IsValidationError(err):
+        return apperrors.NewValidationError("", dbErr.Detail)
+    case generated.IsConnectionError(err):
+        return apperrors.NewServiceUnavailableError("database connection error")
+    case generated.IsTimeout(err):
+        return apperrors.NewTimeoutError(dbErr.Operation)
+    case generated.IsDatabaseError(err):
+        return apperrors.NewServiceUnavailableError("database error")
+    default:
+        return apperrors.NewServiceUnavailableError("unexpected error")
+    }
+}
+```
+
+Use `translateError` in repository methods:
+
+```go
+func (r *ProductRepository) GetByID(ctx context.Context, params models.GetProductParams) (*models.Product, error) {
+    result, err := r.queries.GetProductByID(ctx, params.ProductID)
+    if err != nil {
+        return nil, translateError(err)
+    }
+    // ... rest of method
+}
+```
+
+Skimatik provides these helper functions for error type checking:
+- `IsNotFound(err)` - Record doesn't exist (404)
+- `IsAlreadyExists(err)` - Unique constraint violation (409)
+- `IsInvalidReference(err)` - Foreign key violation (409)
+- `IsValidationError(err)` - Check constraint or NOT NULL violation (400)
+- `IsConnectionError(err)` - Database connection issue (503)
+- `IsTimeout(err)` - Query timeout (408)
+- `IsDatabaseError(err)` - Catch-all for unexpected database errors (500)
 
 ## ID Generation
 

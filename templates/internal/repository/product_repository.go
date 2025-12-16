@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/nhalm/pgxkit"
+	"github.com/yourorg/myapp/internal/apperrors"
 	"github.com/yourorg/myapp/internal/id"
 	"github.com/yourorg/myapp/internal/models"
 	"github.com/yourorg/myapp/internal/repository/generated"
@@ -56,10 +57,7 @@ func (r *ProductRepository) Create(ctx context.Context, req *models.CreateProduc
 func (r *ProductRepository) GetByID(ctx context.Context, params models.GetProductParams) (*models.Product, error) {
 	result, err := r.queries.GetProductByID(ctx, params.ProductID)
 	if err != nil {
-		if errors.Is(err, generated.ErrNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
+		return nil, translateError(err)
 	}
 
 	var metadata map[string]string
@@ -102,14 +100,14 @@ func (r *ProductRepository) Update(ctx context.Context, req *models.UpdateProduc
 }
 
 func (r *ProductRepository) ListWithFilters(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error) {
-	results, err := r.queries.ListProducts(ctx, filter.Active, filter.Limit+1, filter.StartingAfter, filter.EndingBefore)
-	if err != nil {
-		return nil, err
+	var cursor *string
+	if filter.StartingAfter != nil {
+		cursor = filter.StartingAfter
 	}
 
-	hasMore := len(results) > filter.Limit
-	if hasMore {
-		results = results[:filter.Limit]
+	results, nextCursor, err := r.queries.ListProductsPaginated(ctx, filter.Active, filter.Limit, cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	products := make([]*models.Product, len(results))
@@ -132,17 +130,11 @@ func (r *ProductRepository) ListWithFilters(ctx context.Context, filter models.L
 		}
 	}
 
-	var nextCursor, prevCursor *string
-	if len(products) > 0 {
-		last := products[len(products)-1].ID
+	hasMore := nextCursor != nil
+	var prevCursor *string
+	if cursor != nil && len(products) > 0 {
 		first := products[0].ID
-		if hasMore {
-			nextCursor = &last
-		}
-		// Can go back if we're paginating forward or backward
-		if filter.StartingAfter != nil || filter.EndingBefore != nil {
-			prevCursor = &first
-		}
+		prevCursor = &first
 	}
 
 	return &models.ListProductsResult{
@@ -155,4 +147,32 @@ func (r *ProductRepository) ListWithFilters(ctx context.Context, filter models.L
 
 func (r *ProductRepository) Delete(ctx context.Context, params models.DeleteProductParams) error {
 	return r.ProductsRepository.Delete(ctx, params.ProductID)
+}
+
+func translateError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var dbErr *generated.DatabaseError
+	errors.As(err, &dbErr)
+
+	switch {
+	case generated.IsNotFound(err):
+		return apperrors.NewNotFoundError(dbErr.Entity, "")
+	case generated.IsAlreadyExists(err):
+		return apperrors.NewConflictError(dbErr.Entity, "already exists")
+	case generated.IsInvalidReference(err):
+		return apperrors.NewConflictError(dbErr.Entity, "referenced resource does not exist")
+	case generated.IsValidationError(err):
+		return apperrors.NewValidationError("", dbErr.Detail)
+	case generated.IsConnectionError(err):
+		return apperrors.NewServiceUnavailableError("database connection error")
+	case generated.IsTimeout(err):
+		return apperrors.NewTimeoutError(dbErr.Operation)
+	case generated.IsDatabaseError(err):
+		return apperrors.NewServiceUnavailableError("database error")
+	default:
+		return apperrors.NewServiceUnavailableError("unexpected error")
+	}
 }

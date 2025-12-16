@@ -32,7 +32,6 @@ type ListProductsFilter struct {
 	Active        *bool
 	Limit         int
 	StartingAfter *string
-	EndingBefore  *string
 }
 
 type ListProductsResult struct {

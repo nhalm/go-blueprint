@@ -62,3 +62,33 @@ func (e *OptimisticLockError) Error() string {
 func NewOptimisticLockError(resource, id string) *OptimisticLockError {
 	return &OptimisticLockError{Resource: resource, ID: id}
 }
+
+type ServiceUnavailableError struct {
+	Message string
+}
+
+func (e *ServiceUnavailableError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("service unavailable: %s", e.Message)
+	}
+	return "service unavailable"
+}
+
+func NewServiceUnavailableError(message string) *ServiceUnavailableError {
+	return &ServiceUnavailableError{Message: message}
+}
+
+type TimeoutError struct {
+	Operation string
+}
+
+func (e *TimeoutError) Error() string {
+	if e.Operation != "" {
+		return fmt.Sprintf("operation timed out: %s", e.Operation)
+	}
+	return "operation timed out"
+}
+
+func NewTimeoutError(operation string) *TimeoutError {
+	return &TimeoutError{Operation: operation}
+}

@@ -2,11 +2,8 @@ package service
 
 import (
 	"context"
-	"errors"
 
-	"github.com/yourorg/myapp/internal/apperrors"
 	"github.com/yourorg/myapp/internal/models"
-	"github.com/yourorg/myapp/internal/repository"
 )
 
 type ProductRepository interface {
@@ -32,25 +29,13 @@ func (s *ProductService) CreateProduct(ctx context.Context, req *models.CreatePr
 }
 
 func (s *ProductService) GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error) {
-	product, err := s.repo.GetByID(ctx, params)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return nil, apperrors.NewNotFoundError("product", params.ProductID)
-		}
-		return nil, err
-	}
-
-	return product, nil
+	return s.repo.GetByID(ctx, params)
 }
 
 func (s *ProductService) UpdateProduct(ctx context.Context, req *models.UpdateProductRequest) (*models.Product, error) {
 	if _, err := s.repo.GetByID(ctx, models.GetProductParams{ProductID: req.ID}); err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return nil, apperrors.NewNotFoundError("product", req.ID)
-		}
 		return nil, err
 	}
-
 	return s.repo.Update(ctx, req)
 }
 
@@ -60,11 +45,7 @@ func (s *ProductService) ListProducts(ctx context.Context, filter models.ListPro
 
 func (s *ProductService) DeleteProduct(ctx context.Context, params models.DeleteProductParams) error {
 	if _, err := s.repo.GetByID(ctx, models.GetProductParams{ProductID: params.ProductID}); err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return apperrors.NewNotFoundError("product", params.ProductID)
-		}
 		return err
 	}
-
 	return s.repo.Delete(ctx, params)
 }

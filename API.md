@@ -418,7 +418,6 @@ func (h *Handler) ListProducts(w http.ResponseWriter, r *http.Request) {
         Active:        active,
         Limit:         limit,
         StartingAfter: ptrOrNil(r.URL.Query().Get("starting_after")),
-        EndingBefore:  ptrOrNil(r.URL.Query().Get("ending_before")),
     }
 
     result, err := h.productSvc.ListProducts(r.Context(), filter)

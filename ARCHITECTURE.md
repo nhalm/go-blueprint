@@ -69,7 +69,6 @@ type ListProductsFilter struct {
     Active        *bool
     Limit         int
     StartingAfter *string
-    EndingBefore  *string
 }
 ```
 
@@ -163,14 +162,8 @@ func (s *ProductService) CreateProduct(ctx context.Context, req *models.CreatePr
 }
 
 func (s *ProductService) GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error) {
-    product, err := s.repo.GetByID(ctx, params)
-    if err != nil {
-        if errors.Is(err, repository.ErrNotFound) {
-            return nil, apperrors.NewNotFoundError("product", params.ProductID)
-        }
-        return nil, err
-    }
-    return product, nil
+    // Repository returns apperrors directly, so just propagate
+    return s.repo.GetByID(ctx, params)
 }
 ```
 
@@ -486,7 +479,8 @@ func (m *mockProductRepo) GetByID(ctx context.Context, params models.GetProductP
     if p, ok := m.products[params.ProductID]; ok {
         return p, nil
     }
-    return nil, repository.ErrNotFound
+    // Mock returns apperrors directly (same as real repository)
+    return nil, apperrors.NewNotFoundError("product", params.ProductID)
 }
 
 func TestGetProduct_NotFound(t *testing.T) {
