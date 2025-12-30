@@ -305,15 +305,14 @@ canonlog.SetupGlobalLogger("info", "text")
 
 // In HTTP handlers: add fields to request context
 func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
-    canonlog.AddRequestFields(r.Context(), map[string]any{
+    canonlog.InfoAddMany(r.Context(), map[string]any{
         "product_name": req.Name,
     })
     // ...
 }
 
 // Record errors (sets log level to ERROR)
-// Used in response helpers
-canonlog.AddRequestError(r.Context(), err)
+canonlog.ErrorAdd(r.Context(), "error", err.Error())
 ```
 
 ### golang-migrate - Migrations

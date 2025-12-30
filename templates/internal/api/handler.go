@@ -43,7 +43,7 @@ func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	canonlog.AddRequestFields(r.Context(), map[string]any{
+	canonlog.InfoAddMany(r.Context(), map[string]any{
 		"product_name": req.Name,
 	})
 

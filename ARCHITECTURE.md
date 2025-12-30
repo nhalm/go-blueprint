@@ -218,7 +218,7 @@ func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
     }
 
     // Add request context for logging
-    canonlog.AddRequestFields(r.Context(), map[string]any{
+    canonlog.InfoAddMany(r.Context(), map[string]any{
         "product_name": req.Name,
     })
 

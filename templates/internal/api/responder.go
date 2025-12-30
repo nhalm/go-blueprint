@@ -15,7 +15,7 @@ func renderJSON(w http.ResponseWriter, statusCode int, data any) {
 }
 
 func renderError(w http.ResponseWriter, r *http.Request, statusCode int, err error, message, param string) {
-	canonlog.AddRequestError(r.Context(), err)
+	canonlog.ErrorAdd(r.Context(), "error", err.Error())
 	sanitizedMessage := sanitizeErrorMessage(message, statusCode)
 	renderJSON(w, statusCode, NewErrorResponse(statusCode, err, sanitizedMessage, param))
 }
