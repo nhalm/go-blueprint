@@ -6,14 +6,6 @@ import (
 	"github.com/yourorg/myapp/internal/models"
 )
 
-type ProductRepository interface {
-	Create(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-	GetByID(ctx context.Context, params models.GetProductParams) (*models.Product, error)
-	Update(ctx context.Context, req *models.UpdateProductRequest) (*models.Product, error)
-	Delete(ctx context.Context, params models.DeleteProductParams) error
-	ListWithFilters(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error)
-}
-
 type ProductService struct {
 	repo ProductRepository
 }

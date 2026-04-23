@@ -33,16 +33,6 @@ func init() {
 }
 
 func runServe(_ *cobra.Command, _ []string) error {
-	logLevel := viper.GetString("LOG_LEVEL")
-	if logLevel == "" {
-		logLevel = "info"
-	}
-	logFormat := viper.GetString("LOG_FORMAT")
-	if logFormat == "" {
-		logFormat = "text"
-	}
-	canonlog.SetupGlobalLogger(logLevel, logFormat)
-
 	host := viper.GetString("HOST")
 	port := viper.GetInt("PORT")
 	addr := fmt.Sprintf("%s:%d", host, port)
@@ -94,27 +84,40 @@ func runServe(_ *cobra.Command, _ []string) error {
 		MaxHeaderBytes: 1048576,
 	}
 
+	serverErrCh := make(chan error, 1)
 	go func() {
-		fmt.Printf("Server starting on %s\n", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
-			os.Exit(1)
+			serverErrCh <- err
 		}
 	}()
 
+	startCtx := canonlog.NewContext(context.Background())
+	canonlog.InfoAddMany(startCtx, map[string]any{
+		"event": "server_starting",
+		"addr":  addr,
+	})
+	canonlog.Flush(startCtx)
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
 
-	fmt.Println("\nShutting down server...")
+	select {
+	case err := <-serverErrCh:
+		return err
+	case sig := <-quit:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("server forced to shutdown: %w", err)
+		}
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("server forced to shutdown: %w", err)
+		logCtx := canonlog.NewContext(context.Background())
+		canonlog.InfoAddMany(logCtx, map[string]any{
+			"event":  "server_stopped",
+			"signal": sig.String(),
+		})
+		canonlog.Flush(logCtx)
+		return nil
 	}
-
-	fmt.Println("Server stopped")
-	return nil
 }

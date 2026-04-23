@@ -1,9 +1,10 @@
 package cmd
 
 import (
-	"fmt"
+	"context"
 	"os"
 
+	"github.com/nhalm/canonlog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -18,7 +19,9 @@ var rootCmd = &cobra.Command{
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		ctx := canonlog.NewContext(context.Background())
+		canonlog.ErrorAdd(ctx, err)
+		canonlog.Flush(ctx)
 		os.Exit(1)
 	}
 }
@@ -38,7 +41,24 @@ func initConfig() {
 
 	viper.AutomaticEnv()
 
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+	configLoaded := viper.ReadInConfig() == nil
+
+	logLevel := viper.GetString("LOG_LEVEL")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	logFormat := viper.GetString("LOG_FORMAT")
+	if logFormat == "" {
+		logFormat = "text"
+	}
+	canonlog.SetupGlobalLogger(logLevel, logFormat)
+
+	if configLoaded {
+		ctx := canonlog.NewContext(context.Background())
+		canonlog.InfoAddMany(ctx, map[string]any{
+			"event":       "config_loaded",
+			"config_file": viper.ConfigFileUsed(),
+		})
+		canonlog.Flush(ctx)
 	}
 }

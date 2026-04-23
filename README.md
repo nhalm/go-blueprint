@@ -43,6 +43,7 @@ make setup
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Clean architecture layers, patterns, dependency injection |
 | [DATABASE.md](DATABASE.md) | Schema design, Skimatik config, migrations |
 | [API.md](API.md) | Response conventions, handlers, middleware |
+| [TESTING.md](TESTING.md) | Test layout, mocking with gomock, pgxkit.RequireDB, Makefile targets |
 | [DEVOPS.md](DEVOPS.md) | Docker, Makefile, GitHub Actions CI |
 | `templates/` | Complete, copy-ready file templates |
 

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -11,15 +10,6 @@ import (
 	"github.com/nhalm/canonlog"
 	"github.com/yourorg/myapp/internal/models"
 )
-
-// ProductService defines only the methods the API layer needs from the product service.
-type ProductService interface {
-	CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-	GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error)
-	UpdateProduct(ctx context.Context, req *models.UpdateProductRequest) (*models.Product, error)
-	DeleteProduct(ctx context.Context, params models.DeleteProductParams) error
-	ListProducts(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error)
-}
 
 type Handler struct {
 	productSvc ProductService

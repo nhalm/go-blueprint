@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/nhalm/canonlog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -57,13 +59,17 @@ func runMigrations(direction string) error {
 		if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 			return fmt.Errorf("failed to run migrations: %w", err)
 		}
-		fmt.Println("Migrations completed successfully")
 	case "down":
 		if err := m.Steps(-1); err != nil && err != migrate.ErrNoChange {
 			return fmt.Errorf("failed to rollback migration: %w", err)
 		}
-		fmt.Println("Migration rolled back successfully")
 	}
 
+	ctx := canonlog.NewContext(context.Background())
+	canonlog.InfoAddMany(ctx, map[string]any{
+		"event":     "migration_completed",
+		"direction": direction,
+	})
+	canonlog.Flush(ctx)
 	return nil
 }
