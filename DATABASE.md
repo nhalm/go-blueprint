@@ -315,7 +315,7 @@ Files live in `internal/database/migrations/` with the standard naming conventio
 000002_add_products_active_index.down.sql
 ```
 
-Run via your app's `migrate` subcommand (see `cmd/<app>/migrate.go` — cloak's version is the reference):
+Run via your app's `migrate` subcommand:
 
 ```bash
 myapp migrate up       # apply all pending
@@ -323,7 +323,7 @@ myapp migrate down     # rollback one
 myapp migrate version  # show current version + dirty flag
 ```
 
-Migration command structure (see cloak's `cmd/cloak/migrate.go` for the full version):
+Full `migrate up` command:
 
 ```go
 func runMigrateUp(cmd *cobra.Command, args []string) error {
@@ -384,7 +384,3 @@ make generate
 ```
 
 **Never** use this path in production — always use `migrate up`.
-
-## Working Reference
-
-See cloak's `internal/repository/` for working examples of every pattern above: `account.go` for the embed-generated repo pattern, `tx.go` for the transaction-via-context pattern, `errors.go` for the skimatik → sentinel translation, `queries/*.sql` for annotated query files, and `repository_integration_test.go` for integration tests.

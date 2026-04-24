@@ -28,15 +28,15 @@ func TestProductRepository_CRUD(t *testing.T) {
 
 `make test` passes `-short` and skips them; `make test-integration` runs everything.
 
-E2E tests live in a separate `test/e2e/` directory with shared `setup_test.go` / `helpers_test.go` (see cloak's `test/e2e/` for layout).
+E2E tests live in a separate `test/e2e/` directory with shared `setup_test.go` / `helpers_test.go` — one file to spin up the full stack (db, migrations, `httptest.Server`) and one with small request-building helpers consumed by the tests.
 
 ## Mocking — gomock
 
 Each layer defines the interfaces it consumes (consumer-owned interfaces — see [ARCHITECTURE.md](ARCHITECTURE.md#consumer-owned-interfaces)). A `//go:generate mockgen` directive points at whichever file declares them.
 
 ```go
-// internal/service/interfaces.go
-//go:generate mockgen -source=interfaces.go -destination=mock_interfaces_test.go -package=service
+// internal/service/repository_interface.go
+//go:generate mockgen -source=repository_interface.go -destination=repository_interface_mock.go -package=service
 
 package service
 
@@ -47,7 +47,7 @@ type ProductRepository interface {
 }
 ```
 
-Run `go generate ./...` (via `make generate`) to produce the `mock_*_test.go` files. Mocks live alongside the tests and never ship in production binaries because the filenames end in `_test.go`.
+Run `go generate ./...` (via `make generate`) to produce the `*_interface_mock.go` files. Each mock lives in the same package as the interface it implements — `service.MockProductRepository` is declared in `internal/service/repository_interface_mock.go`; `api.MockProductServiceInterface` is declared in `internal/api/service_interface_mock.go`.
 
 For tiny single-method dependencies (key providers, audit hooks), prefer a hand-written struct — generation is overkill:
 
@@ -313,14 +313,4 @@ make test-db-down       # remove it
 make test-db-migrate    # apply migrations to the test DB
 ```
 
-The test DB runs on a dedicated port (default `15432` in the template Makefile) so it doesn't fight with the dev DB on `5432`. Pick a unique port per service if you run several side-by-side (cloak uses `15455`, skimatik uses `15987`).
-
-## Working References
-
-| What you want | Where to look |
-|---------------|---------------|
-| Handler test with gomock + chikit middleware | `cloak/internal/api/handler_test.go` |
-| Service test with mockgen + testify | `cloak/internal/service/alias_test.go`, `card_test.go` |
-| Repository integration test | `cloak/internal/repository/repository_integration_test.go` |
-| E2E setup | `cloak/test/e2e/setup_test.go`, `helpers_test.go` |
-| Minimal integration-only shape | `skimatik/example-app/repository/pagination_test.go` |
+The test DB runs on a dedicated port (default `15432` in the template Makefile) so it doesn't fight with the dev DB on `5432`. Pick a unique port per service if you run several side-by-side.

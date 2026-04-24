@@ -134,7 +134,7 @@ swagger:
 	@swag init -g cmd/myapp/main.go -o docs
 ```
 
-**Change the port per service** when you run more than one locally. Cloak uses `15455`, skimatik's example-app uses `15987`, the blueprint template defaults to `15432`.
+**Change the port per service** when you run more than one locally. The template defaults to `15432`; pick any unused port in the high range.
 
 ## GitHub Actions CI
 
@@ -428,7 +428,3 @@ make generate
 ```
 
 Production always uses `migrate up`, never schema.sql.
-
-## Working Reference
-
-See [`github.com/nhalm/cloak`](https://github.com/nhalm/cloak) for a service running this exact workflow in production.

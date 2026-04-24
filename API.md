@@ -4,7 +4,7 @@ Handlers, middleware, request/response conventions, and error mapping — built 
 
 ## Middleware Stack
 
-The full stack for cloak-style services lives in `internal/api/routes.go`. Order matters: `chikit.Handler` must run first so every downstream middleware (including auth/header extraction) accumulates into the canonical log for that request.
+Define the router in `internal/api/routes.go`. Order matters: `chikit.Handler` must run first so every downstream middleware (including auth/header extraction) accumulates into the canonical log for that request.
 
 ```go
 package api
@@ -87,21 +87,20 @@ func Routes(h *Handler, rateLimitStore store.Store) chi.Router {
 
 ## Handler Shape
 
+The interface the handler consumes lives in its own file with the mockgen directive:
+
 ```go
-// internal/api/handler.go
-//go:generate mockgen -source=handler.go -destination=mock_handler_test.go -package=api
+// internal/api/service_interface.go
+//go:generate mockgen -source=service_interface.go -destination=service_interface_mock.go -package=api
 
 package api
 
 import (
     "context"
 
-    "github.com/nhalm/cloak/internal/config"
-    "github.com/nhalm/cloak/internal/models"
-    "github.com/nhalm/pgxkit/v2"
+    "github.com/yourorg/myapp/internal/models"
 )
 
-// Consumer-owned interface — Handler declares only what it needs.
 type ProductServiceInterface interface {
     CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
     GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error)
@@ -109,6 +108,18 @@ type ProductServiceInterface interface {
     DeleteProduct(ctx context.Context, params models.DeleteProductParams) error
     ListProducts(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error)
 }
+```
+
+The handler itself is a plain struct with a constructor:
+
+```go
+// internal/api/handler.go
+package api
+
+import (
+    "github.com/nhalm/pgxkit/v2"
+    "github.com/yourorg/myapp/internal/config"
+)
 
 type Handler struct {
     productService ProductServiceInterface
@@ -462,6 +473,3 @@ Annotate handlers with standard swaggo tags. Generate with `make swagger` (`swag
 func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) { /* ... */ }
 ```
 
-## Working Reference
-
-See cloak's `internal/api/` for a full implementation of every pattern above — `routes.go` for the middleware stack, `aliases.go` / `cards.go` / `cardholders.go` for handlers, `errors.go` for the full error map, `validators.go` for custom tag registration.

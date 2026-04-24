@@ -263,7 +263,7 @@ func initConfig() {
 
 ## Logging During CLI Commands
 
-Runtime application logging must go through canonlog — see [observability conventions](ARCHITECTURE.md). Two narrow exceptions, both demonstrated in cloak:
+Runtime application logging must go through canonlog — see [observability conventions](ARCHITECTURE.md). Two narrow exceptions:
 
 1. **Pre-canonlog**: the `"Using config file: ..."` note in `initConfig` goes to `stderr` via `fmt.Fprintln`. That runs before any subcommand has loaded its config, so canonlog isn't set up yet.
 
@@ -304,6 +304,62 @@ handler := api.NewHandler(mockSvc, nil, cfg)
 
 Don't read env vars in tests. If the code under test really cares about env-driven behavior, route it through `config.Config` first.
 
-## Working Reference
+## Unit-Testing the Loader
 
-See cloak's `internal/config/config.go` for the full pattern with cross-field validation, Redis URL parsing, hex key decoding, and a companion `config_test.go` that unit-tests the loader.
+The loaders have enough conditional logic (defaults, validation, cross-field constraints) that they deserve their own unit tests. Test the happy path, each required-field failure, each out-of-bounds failure, and the cross-field constraint:
+
+```go
+// internal/config/config_test.go
+package config
+
+import (
+    "testing"
+
+    "github.com/spf13/viper"
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+)
+
+func TestLoad_RequiresDatabaseURL(t *testing.T) {
+    t.Cleanup(viper.Reset)
+    viper.Reset()
+
+    _, err := Load()
+    require.Error(t, err)
+    assert.Contains(t, err.Error(), "DATABASE_URL")
+}
+
+func TestLoad_AppliesDefaults(t *testing.T) {
+    t.Cleanup(viper.Reset)
+    viper.Reset()
+    viper.Set("DATABASE_URL", "postgres://localhost/test")
+    viper.Set("HTTP_READ_TIMEOUT_SECONDS", 15)
+    viper.Set("HTTP_WRITE_TIMEOUT_SECONDS", 15)
+    viper.Set("HTTP_IDLE_TIMEOUT_SECONDS", 60)
+    viper.Set("HTTP_REQUEST_TIMEOUT_SECONDS", 30)
+
+    cfg, err := Load()
+    require.NoError(t, err)
+    assert.Equal(t, 8080, cfg.HTTPPort)
+    assert.Equal(t, "info", cfg.LogLevel)
+    assert.Equal(t, "text", cfg.LogFormat)
+}
+
+func TestLoad_RejectsMinConnsGreaterThanMaxConns(t *testing.T) {
+    t.Cleanup(viper.Reset)
+    viper.Reset()
+    viper.Set("DATABASE_URL", "postgres://localhost/test")
+    viper.Set("HTTP_READ_TIMEOUT_SECONDS", 15)
+    viper.Set("HTTP_WRITE_TIMEOUT_SECONDS", 15)
+    viper.Set("HTTP_IDLE_TIMEOUT_SECONDS", 60)
+    viper.Set("HTTP_REQUEST_TIMEOUT_SECONDS", 30)
+    viper.Set("DB_MAX_CONNS", 5)
+    viper.Set("DB_MIN_CONNS", 10)
+
+    _, err := Load()
+    require.Error(t, err)
+    assert.Contains(t, err.Error(), "DB_MIN_CONNS")
+}
+```
+
+`viper.Reset()` in `t.Cleanup` keeps tests independent — viper is package-global state, so leaking between tests is easy to do accidentally.
