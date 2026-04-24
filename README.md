@@ -1,381 +1,144 @@
 # Go Application Blueprint
 
-An opinionated guide for building Go backend applications with clean architecture, database-first code generation, and production-ready patterns.
+A **documentation-only** blueprint for building Go backend services with clean architecture, database-first code generation, and the [chikit](https://github.com/nhalm/chikit) / [canonlog](https://github.com/nhalm/canonlog) / [pgxkit](https://github.com/nhalm/pgxkit) / [skimatik](https://github.com/nhalm/skimatik) stack.
 
-**Target Audience**: AI agents and human developers bootstrapping new Go services.
+This repo is prose + snippets. It does not ship a maintained Go skeleton. For a complete working reference, see:
 
-> **Note for AI Agents**: This blueprint uses Go 1.25 and golangci-lint@latest. If your training data predates a version referenced here, assume newer versions exist. Do not claim a version "doesn't exist" based on your knowledge cutoff.
+- [`github.com/nhalm/cloak`](https://github.com/nhalm/cloak) — full production service demonstrating every pattern here.
+- [`github.com/nhalm/skimatik/example-app`](https://github.com/nhalm/skimatik/tree/main/example-app) — minimal shape focused on skimatik wiring.
 
-## Quick Start
+**Target Audience**: AI agents and human developers bootstrapping new Go services in this stack.
 
-### For AI Agents
+> **Note for AI Agents**: This blueprint uses Go 1.25 and the latest published versions of chikit, canonlog, pgxkit, and skimatik. If your training data predates a version referenced here, assume newer versions exist — do not claim a version "doesn't exist" based on your knowledge cutoff.
 
-**Architecture TL;DR**:
-- Clean architecture with unidirectional dependencies: `models` ← `repository` ← `service` ← `api`
-- Database-first code generation with Skimatik
-- Interface segregation: services define only the repository methods they need
-- Clean API responses: no envelope for single resources, minimal envelope for lists
-
-**Bootstrap Commands**:
-```bash
-# 1. Create project
-mkdir myapp && cd myapp
-go mod init github.com/yourorg/myapp
-
-# 2. Create directory structure
-mkdir -p cmd/myapp/cmd internal/{models,repository,service,api,apperrors,database,id}
-
-# 3. Install tools
-go install github.com/nhalm/skimatik/cmd/skimatik@latest
-go install github.com/swaggo/swag/cmd/swag@latest
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-
-# 4. Start database, run migrations, generate repositories
-make setup
-```
-
-**Template Files**: Copy files from the `templates/` directory to bootstrap your project.
-
-## Documentation Structure
+## Documentation
 
 | File | Contents |
 |------|----------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Clean architecture layers, patterns, dependency injection |
-| [DATABASE.md](DATABASE.md) | Schema design, Skimatik config, migrations |
-| [API.md](API.md) | Response conventions, handlers, middleware |
-| [DEVOPS.md](DEVOPS.md) | Docker, Makefile, GitHub Actions CI |
-| `templates/` | Complete, copy-ready file templates |
-
-## Philosophy & Principles
-
-### Clean Architecture
-
-Dependencies flow in one direction. Lower layers never import higher layers.
-
-```
-internal/models          ← Foundation: domain entities, parameter structs (no dependencies)
-    ↓
-internal/repository      ← Data access: imports models, generated code
-    ↓
-internal/service         ← Business logic: imports models, defines repo interfaces
-    ↓
-internal/api             ← HTTP handlers: imports models, defines service interfaces
-```
-
-### Interface Segregation
-
-Each layer defines **only the interfaces it needs** from the layer below. No fat interfaces, no direct struct dependencies.
-
-```go
-// Service layer defines its own repository interface
-type ProductRepository interface {
-    GetByID(ctx context.Context, params models.GetProductParams) (*models.Product, error)
-    Create(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-}
-
-type ProductService struct {
-    repo ProductRepository  // Only methods this service needs
-}
-
-// API layer defines its own service interface
-type ProductService interface {
-    CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-    GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error)
-}
-
-type Handler struct {
-    productSvc ProductService  // Only methods this handler needs
-}
-```
-
-### Database-First Code Generation
-
-Schema is the source of truth. Skimatik generates type-safe repositories with CRUD operations and cursor pagination. Custom repositories **embed** generated code and add domain-specific methods.
-
-### Provider-Agnostic Design
-
-No vendor-specific column names. Use generic names (`external_payment_id`, `checkout_session_id`) to support future integrations.
-
-### Explicit Over Magic
-
-- No dependency injection frameworks (wire, dig)
-- No ORM magic (GORM, ent)
-- Direct, readable wiring in `serve.go`
-- SQL queries you can understand
-
-### ID Generation Strategy
-
-Use **KSUID** (K-Sortable Unique Identifier) with entity prefixes for primary keys.
-
-**Why not UUIDs?**
-- UUIDv4: Random, not time-sortable, poor index locality
-- UUIDv7: Time-sortable but 36 characters with dashes
-
-**Why KSUID?**
-- Time-ordered (like UUIDv7) for good database index locality
-- Shorter: 27 characters vs 36 for UUID
-- URL-safe: No special characters
-- Collision-resistant: 128 bits of randomness + timestamp
-
-**With Prefixes:**
-```
-prod_2ArTLVPddDx8vZk7CqEbiYp1   # Product
-pl_2ArTLVPddDx8vZk7CqEbiYp3     # Payment Link
-pay_2ArTLVPddDx8vZk7CqEbiYp4    # Payment
-```
-
-Prefixes make IDs self-documenting in logs, URLs, and debugging. Use `TEXT PRIMARY KEY` in PostgreSQL.
-
-## Project Structure
-
-```
-myapp/
-├── cmd/
-│   └── myapp/
-│       ├── main.go              # Entry point, Swagger annotations
-│       └── cmd/
-│           ├── root.go          # Cobra root, Viper config
-│           ├── serve.go         # HTTP server, dependency injection
-│           └── migrate.go       # Database migrations
-├── internal/
-│   ├── models/                  # Domain entities + parameter structs
-│   │   ├── product.go
-│   │   └── params.go            # All *Params types
-│   ├── repository/
-│   │   ├── generated/           # Skimatik output (git-ignored or committed)
-│   │   ├── queries/             # Custom SQL files for Skimatik
-│   │   ├── product_repository.go
-│   │   └── helpers.go
-│   ├── service/
-│   │   ├── product_service.go
-│   │   └── errors.go
-│   ├── api/
-│   │   ├── handler.go           # Handler struct, constructor
-│   │   ├── routes.go            # Chi router, middleware
-│   │   ├── models.go            # Request/response types
-│   │   ├── responder.go         # Response helpers
-│   │   ├── response.go          # Response types
-│   │   ├── errors.go            # Error translation
-│   │   ├── middleware.go        # Custom middleware
-│   │   └── validator.go         # Input validation
-│   ├── apperrors/
-│   │   └── errors.go            # Domain error types
-│   ├── database/
-│   │   ├── schema.sql           # Current schema (for dev reset)
-│   │   └── migrations/          # golang-migrate files
-│   └── id/
-│       └── generator.go         # KSUID generation
-├── docs/                        # Generated Swagger (swag init)
-├── skimatik.yaml                # Code generator config
-├── docker-compose.yml
-├── Makefile
-├── .env.example
-├── .gitignore
-└── go.mod
-```
-
-### Package Responsibilities
-
-| Package | Imports | Responsibility |
-|---------|---------|----------------|
-| `models` | stdlib only | Domain entities, parameter structs |
-| `repository` | models, generated, pgxkit | Data access, SQL queries |
-| `service` | models, apperrors | Business logic, validation, transactions |
-| `api` | models, service | HTTP handlers, request/response conversion |
-| `apperrors` | stdlib only | Domain error types |
-| `id` | ksuid | Unique ID generation |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Layer tree, package responsibilities, consumer-owned interfaces, DI pattern, ID strategy |
+| [CONFIG.md](CONFIG.md) | `internal/config` package, per-command loaders (`Load`, `LoadDatabaseOnly`), canonlog setup timing |
+| [API.md](API.md) | `chikit.Handler` middleware stack, handlers, `chikit.SetResponse` / `SetError`, error mapping, response conventions |
+| [DATABASE.md](DATABASE.md) | Schema principles, pgxkit v2 Executor, skimatik config and `.sql` annotations, transactions via context, golang-migrate |
+| [TESTING.md](TESTING.md) | Layer strategy, gomock + testify, `pgxkit.RequireDB`, mounting chikit middleware in handler tests, Makefile targets |
+| [DEVOPS.md](DEVOPS.md) | Docker Compose, Makefile, GitHub Actions CI, `.env` vars, golangci-lint config |
+| `templates/` | Copy-ready non-code scaffolding: `Makefile`, `docker-compose.yml`, `skimatik.yaml`, `.golangci.yml`, `.github/workflows/ci.yml`, `.env.example`, `.gitignore` |
 
 ## Core Packages
 
-### Cobra - CLI Framework
+| Package | Use | Version |
+|---------|-----|---------|
+| [skimatik](https://github.com/nhalm/skimatik) | PostgreSQL → Go repository codegen | v0.7+ |
+| [pgxkit/v2](https://github.com/nhalm/pgxkit) | Connection pooling, Executor interface, test helpers | v2.0+ |
+| [chikit](https://github.com/nhalm/chikit) | Chi middleware: canonlog context, timeout, rate limit, body size, header extraction, JSON binding, response writing | v1.0+ |
+| [canonlog](https://github.com/nhalm/canonlog) | Canonical per-request logging | v0.3+ |
+| [golang-migrate](https://github.com/golang-migrate/migrate) | SQL migrations | v4 |
+| [cobra](https://github.com/spf13/cobra) + [viper](https://github.com/spf13/viper) | CLI framework + env/file config | latest |
+| [chi](https://github.com/go-chi/chi) | HTTP router | v5 |
+| [testify](https://github.com/stretchr/testify), [gomock](https://pkg.go.dev/go.uber.org/mock) | Testing | latest |
+| [ksuid](https://github.com/segmentio/ksuid) | Time-ordered IDs | latest |
 
-Provides subcommands (`serve`, `migrate up`, `migrate down`).
+## Philosophy
 
-```go
-// cmd/myapp/main.go
-func main() {
-    cmd.Execute()
-}
+### Clean Architecture, Unidirectional
 
-// cmd/myapp/cmd/root.go
-var rootCmd = &cobra.Command{
-    Use:   "myapp",
-    Short: "My application",
-}
-
-func Execute() {
-    if err := rootCmd.Execute(); err != nil {
-        os.Exit(1)
-    }
-}
-
-func init() {
-    cobra.OnInitialize(initConfig)
-    rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file")
-}
+```
+models ← repository ← service ← api ← cmd
+errors ← every layer
+config ← cmd, service (when injected)
 ```
 
-### Viper - Configuration
+Lower layers never import higher layers. `models` and `errors` are the foundation.
 
-Loads `.env` files with environment variable overrides.
+### Consumer-Owned Interfaces
 
-```go
-func initConfig() {
-    if cfgFile != "" {
-        viper.SetConfigFile(cfgFile)
-    } else {
-        viper.SetConfigFile(".env")
-        viper.SetConfigType("env")
-    }
-    viper.AutomaticEnv()
-    _ = viper.ReadInConfig()
-}
+Each layer defines the interfaces it consumes. The service layer's `interfaces.go` declares `ProductRepository`; the api layer's `handler.go` declares `ProductServiceInterface`. `//go:generate mockgen -source=...` at the top of whichever file holds them. Full rule in [ARCHITECTURE.md](ARCHITECTURE.md#consumer-owned-interfaces).
 
-// Usage
-port := viper.GetInt("PORT")
-dbURL := viper.GetString("DATABASE_URL")
+### Explicit Dependency Injection
+
+No framework (no wire, no dig). Each command's `RunE` wires top-down. Reading `serve.go` tells you the whole object graph.
+
+### Database-First
+
+Schema is the source of truth. Skimatik generates CRUD + custom queries from `.sql` files. Hand-written repositories embed the generated structs and add domain methods. See [DATABASE.md](DATABASE.md).
+
+### Per-Command Config
+
+`config.Load()` for `serve`; `config.LoadDatabaseOnly()` for `migrate`. Each command calls its loader, then `canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)`, then does its work. No global singleton, no config read inside handlers. See [CONFIG.md](CONFIG.md).
+
+### Observability via canonlog + chikit → Datadog
+
+`chikit.Handler(chikit.WithCanonlog(), chikit.WithCanonlogFields(...))` attaches a per-request logger to `r.Context()`. Handlers and services accumulate fields via `canonlog.AddRequestFields(ctx, ...)`. One canonical log line per request, shipped to Datadog via a sidecar. Don't introduce OTel/Prometheus — the stack already covers it.
+
+### Provider-Agnostic Schema
+
+Generic column names (`external_payment_id`, `checkout_session_id`) — not `stripe_id`, `adyen_ref`. Keeps integrations swappable.
+
+## Identifiers — Prefixed KSUIDs
+
+Text primary keys with entity prefixes:
+
+```
+prod_2ArTLVPddDx8vZk7CqEbiYp1   # Product
+acc_2ArTLVPddDx8vZk7CqEbiYp2    # Account
+tok_2ArTLVPddDx8vZk7CqEbiYp3    # Token
 ```
 
-### Chi - HTTP Router
+**Why KSUID over UUID**: time-ordered (good index locality), 27 characters (vs 36 for UUID), URL-safe, 128-bit random + timestamp.
 
-Lightweight router with middleware support.
+**Why prefixes**: IDs are self-documenting in logs, URLs, debugging output. A reader can tell `prod_` from `tok_` at a glance.
 
-```go
-r := chi.NewRouter()
-r.Use(middleware.RequestID)
-r.Use(middleware.RealIP)
-r.Use(middleware.Recoverer)
+`internal/id/generator.go` exposes one constructor per entity (`NewProductID()`, `NewAccountID()`). Repositories take the constructor as a function value. See [ARCHITECTURE.md](ARCHITECTURE.md#id-strategy--ksuid-with-prefixes).
 
-r.Route("/api/v1", func(r chi.Router) {
-    r.Get("/products", h.ListProducts)
-    r.Post("/products", h.CreateProduct)
-    r.Get("/products/{id}", h.GetProduct)
-})
-```
-
-### Chikit - Chi Utilities
-
-Rate limiting and body size validation.
-
-```go
-import (
-    "github.com/nhalm/chikit/ratelimit"
-    "github.com/nhalm/chikit/ratelimit/store"
-    "github.com/nhalm/chikit/validate"
-)
-
-// Rate limiting
-st := store.NewMemory()
-readLimiter := ratelimit.NewBuilder(st).
-    WithName("read").
-    WithIP().
-    Limit(100, time.Second)
-
-// Body size limit
-r.Use(validate.MaxBodySize(1048576))
-```
-
-### pgxkit - PostgreSQL Utilities
-
-Connection pooling and utilities.
-
-```go
-import "github.com/nhalm/pgxkit"
-
-db := pgxkit.NewDB()
-if err := db.Connect(ctx, databaseURL); err != nil {
-    return err
-}
-defer db.Shutdown(ctx)
-```
-
-### Skimatik - Code Generation
-
-Database-first repository generation. See [DATABASE.md](DATABASE.md) for configuration.
-
-### canonlog - Structured Logging
-
-Request-scoped context accumulation. Use in HTTP handlers only.
-
-```go
-import "github.com/nhalm/canonlog"
-
-// Setup (in serve.go)
-canonlog.SetupGlobalLogger("info", "text")
-
-// In HTTP handlers: add fields to request context
-func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
-    canonlog.AddRequestFields(r.Context(), map[string]any{
-        "product_name": req.Name,
-    })
-    // ...
-}
-
-// Record errors (sets log level to ERROR)
-// Used in response helpers
-canonlog.AddRequestError(r.Context(), err)
-```
-
-### golang-migrate - Migrations
-
-SQL migration management.
-
-```go
-import (
-    "github.com/golang-migrate/migrate/v4"
-    _ "github.com/golang-migrate/migrate/v4/database/postgres"
-    _ "github.com/golang-migrate/migrate/v4/source/file"
-)
-
-m, _ := migrate.New("file://internal/database/migrations", databaseURL)
-m.Up()   // Run all pending
-m.Steps(-1)  // Rollback one
-```
-
-### Package Documentation
-
-For detailed documentation on the custom packages used in this blueprint:
-
-| Package | Documentation |
-|---------|---------------|
-| **skimatik** | https://github.com/nhalm/skimatik |
-| **pgxkit** | https://github.com/nhalm/pgxkit |
-| **chikit** | https://github.com/nhalm/chikit |
-| **canonlog** | https://github.com/nhalm/canonlog |
-
-## Quick Reference
-
-### ID Prefixes
-
-| Entity | Prefix | Example |
-|--------|--------|---------|
-| Product | `prod_` | `prod_2ArTLVPddDx8vZk7CqEbiYp1` |
-| Payment Link | `pl_` | `pl_2ArTLVPddDx8vZk7CqEbiYp3` |
-| Payment | `pay_` | `pay_2ArTLVPddDx8vZk7CqEbiYp4` |
-
-### HTTP Status Codes
+## HTTP Status Codes
 
 | Status | Usage |
 |--------|-------|
-| 200 | Success (GET, PATCH) |
-| 201 | Created (POST) |
-| 204 | No Content (DELETE) |
-| 400 | Bad Request (validation) |
-| 404 | Not Found |
-| 409 | Conflict (optimistic lock) |
-| 429 | Too Many Requests |
-| 500 | Internal Server Error |
+| 200 | `GET`, `PATCH` success |
+| 201 | `POST` created |
+| 204 | `DELETE` success (no body) |
+| 303 | Deduplicated create — `Location` header points at existing resource |
+| 400 | Validation / malformed request |
+| 401 | Missing / invalid auth header |
+| 404 | Resource not found |
+| 409 | Conflict (duplicate, optimistic lock) |
+| 410 | Gone (expired volatile resource) |
+| 429 | Rate limited |
+| 500 | Internal error (details canonlogged, not returned) |
+| 503 | Service unavailable (DB down, upstream down) |
+| 504 | Request timeout |
 
-### Environment Variables
+`chikit.ErrBadRequest`, `chikit.ErrNotFound`, `chikit.ErrConflict`, etc. map to these. Custom statuses use `&chikit.APIError{Status: ...}`. See [API.md](API.md#error-mapping).
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | - | PostgreSQL connection string |
-| `PORT` | 8080 | HTTP server port |
-| `HOST` | 0.0.0.0 | HTTP server host |
-| `LOG_LEVEL` | info | debug, info, warn, error |
-| `LOG_FORMAT` | text | text, json |
-| `RATE_LIMIT_READ_RPS` | 100 | Read rate limit per IP |
-| `RATE_LIMIT_WRITE_RPS` | 20 | Write rate limit per IP |
-| `MAX_REQUEST_BODY_BYTES` | 1048576 | Max request body size |
-| `CORS_ALLOWED_ORIGINS` | http://localhost:5173 | Comma-separated origins |
+## Quick Start for a New Service
+
+```bash
+# 1. New module
+mkdir myapp && cd myapp
+go mod init github.com/yourorg/myapp
+
+# 2. Directory layout
+mkdir -p cmd/myapp \
+         internal/{config,models,repository,service,api,errors,id,database} \
+         internal/database/migrations \
+         internal/repository/queries
+
+# 3. Pull scaffolding from this blueprint's templates/ dir (Makefile,
+#    docker-compose.yml, skimatik.yaml, .golangci.yml, .github/workflows/ci.yml,
+#    .env.example, .gitignore) and search/replace "myapp" with your app name.
+
+# 4. Install tools
+go install github.com/nhalm/skimatik/cmd/skimatik@latest
+go install github.com/swaggo/swag/cmd/swag@latest
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+go install go.uber.org/mock/mockgen@latest
+
+# 5. Write your first migration, schema.sql, one skimatik query file, and
+#    config struct. See DATABASE.md + CONFIG.md.
+
+# 6. Start DB and generate
+cp .env.example .env   # fill in DATABASE_URL
+make setup             # runs install-tools + generate
+make run
+```
+
+For the patterns these files should follow, start at [ARCHITECTURE.md](ARCHITECTURE.md) and read in the order listed in the table above. Cross-check every snippet against [`github.com/nhalm/cloak`](https://github.com/nhalm/cloak) — if something in the docs drifts, cloak is the source of truth.

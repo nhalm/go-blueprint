@@ -1,13 +1,222 @@
-# API Conventions
+# API Layer
 
-This document covers API response patterns, handlers, middleware, and routing.
+Handlers, middleware, request/response conventions, and error mapping — built on **chikit v1.x** and **canonlog v0.3+**.
 
-## Response Structure
+## Middleware Stack
 
-### Single Resources
+The full stack for cloak-style services lives in `internal/api/routes.go`. Order matters: `chikit.Handler` must run first so every downstream middleware (including auth/header extraction) accumulates into the canonical log for that request.
 
-No envelope, returned at root level.
+```go
+package api
 
+import (
+    "net/http"
+
+    "github.com/go-chi/chi/v5"
+    "github.com/go-chi/chi/v5/middleware"
+    "github.com/nhalm/chikit"
+    "github.com/nhalm/chikit/store"
+)
+
+func Routes(h *Handler, rateLimitStore store.Store) chi.Router {
+    r := chi.NewRouter()
+
+    // 1. Request timeout + canonlog context.
+    //    WithCanonlogFields closure pulls already-extracted header values out of
+    //    context and adds them to the canonical log just before Flush.
+    r.Use(chikit.Handler(
+        chikit.WithTimeout(h.config.HTTPRequestTimeout),
+        chikit.WithCanonlog(),
+        chikit.WithCanonlogFields(func(r *http.Request) map[string]any {
+            fields := make(map[string]any)
+            if v, ok := chikit.HeaderFromContext(r.Context(), "account_id"); ok {
+                fields["account_id"] = v
+            }
+            if v, ok := chikit.HeaderFromContext(r.Context(), "request_id"); ok {
+                fields["request_id"] = v
+            }
+            if v, ok := chikit.HeaderFromContext(r.Context(), "client_ip"); ok {
+                fields["client_ip"] = v
+            }
+            return fields
+        }),
+    ))
+
+    // 2. Real client IP from X-Forwarded-For.
+    r.Use(middleware.RealIP)
+
+    // 3. Lift useful request headers into context so handlers and the canonlog
+    //    closure above can read them via chikit.HeaderFromContext.
+    r.Use(chikit.ExtractHeader("X-Request-ID", "request_id"))
+    r.Use(chikit.ExtractHeader("X-Forwarded-For", "client_ip"))
+    r.Use(chikit.ExtractHeader("User-Agent", "user_agent"))
+
+    // 4. Global rate limit (memory store for dev, Redis store for multi-instance prod).
+    globalLimiter := chikit.NewRateLimiter(
+        rateLimitStore,
+        h.config.RateLimitRequests,
+        h.config.RateLimitWindow,
+        chikit.RateLimitWithIP(),
+    )
+    r.Use(globalLimiter.Handler)
+
+    // 5. Public routes — no account header required.
+    r.Get("/health", h.Health)
+    r.Get("/ready", h.Ready)
+
+    // 6. Authenticated routes — require X-Account-ID, enforce body size, bind JSON.
+    r.Route("/v1", func(r chi.Router) {
+        r.Use(chikit.ExtractHeader("X-Account-ID", "account_id", chikit.ExtractRequired()))
+        r.Use(chikit.MaxBodySize(int64(h.config.MaxRequestBodyBytes)))
+        r.Use(chikit.Binder())
+
+        r.Post("/products", h.CreateProduct)
+        r.Get("/products/{id}", h.GetProduct)
+        r.Patch("/products/{id}", h.UpdateProduct)
+        r.Delete("/products/{id}", h.DeleteProduct)
+        r.Get("/products", h.ListProducts)
+    })
+
+    return r
+}
+```
+
+**Stores.** Use `store.NewMemory()` for single-instance dev. Use `store.NewRedis(store.RedisConfig{URL, Password, DB, Prefix})` for multi-instance production so rate limit counts stay consistent across replicas.
+
+**ExtractHeader options.** `chikit.ExtractRequired()` rejects the request with 400 if the header is missing. Without it, the extraction is best-effort (absent header = nothing in context).
+
+## Handler Shape
+
+```go
+// internal/api/handler.go
+//go:generate mockgen -source=handler.go -destination=mock_handler_test.go -package=api
+
+package api
+
+import (
+    "context"
+
+    "github.com/nhalm/cloak/internal/config"
+    "github.com/nhalm/cloak/internal/models"
+    "github.com/nhalm/pgxkit/v2"
+)
+
+// Consumer-owned interface — Handler declares only what it needs.
+type ProductServiceInterface interface {
+    CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
+    GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error)
+    UpdateProduct(ctx context.Context, req *models.UpdateProductRequest) (*models.Product, error)
+    DeleteProduct(ctx context.Context, params models.DeleteProductParams) error
+    ListProducts(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error)
+}
+
+type Handler struct {
+    productService ProductServiceInterface
+    db             *pgxkit.DB
+    config         config.Config
+}
+
+func NewHandler(productSvc ProductServiceInterface, db *pgxkit.DB, cfg config.Config) *Handler {
+    return &Handler{
+        productService: productSvc,
+        db:             db,
+        config:         cfg,
+    }
+}
+```
+
+## Request Binding — `chikit.JSON`, `chikit.Query`
+
+`chikit.Binder()` (applied as middleware) wires up body reading, decoding, and validation. Handlers then use short helpers that return `bool` — `false` means an error response was already written and the handler should return.
+
+```go
+func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
+    val, _ := chikit.HeaderFromContext(r.Context(), "account_id")
+    accountID := val.(string)
+
+    var req CreateProductRequest
+    if !chikit.JSON(r, &req) {
+        return // error response already written by chikit
+    }
+
+    product, err := h.productService.CreateProduct(r.Context(), req.ToServiceModel(accountID))
+    if err != nil {
+        handleServiceError(r, err)
+        return
+    }
+
+    chikit.SetResponse(r, http.StatusCreated, ProductResponseFromModel(product))
+}
+
+func (h *Handler) GetProduct(w http.ResponseWriter, r *http.Request) {
+    val, _ := chikit.HeaderFromContext(r.Context(), "account_id")
+    accountID := val.(string)
+    id := chi.URLParam(r, "id")
+
+    product, err := h.productService.GetProduct(r.Context(), models.GetProductParams{
+        AccountID: accountID,
+        ProductID: id,
+    })
+    if err != nil {
+        handleServiceError(r, err)
+        return
+    }
+
+    chikit.SetResponse(r, http.StatusOK, ProductResponseFromModel(product))
+}
+```
+
+Key points:
+- Handlers don't call `w.WriteHeader` or `json.NewEncoder(w).Encode(...)` — `chikit.SetResponse` does both.
+- Handlers don't call `w.WriteHeader(http.StatusBadRequest)` on errors — `chikit.SetError(r, ...)` does.
+- Error responses are never `200 + {error: ...}` — always non-2xx with a structured body (see *Error Responses* below).
+
+## Request / Response Types
+
+Request types have validation tags; response types don't.
+
+```go
+// internal/api/products.go
+
+type CreateProductRequest struct {
+    Name        string  `json:"name" validate:"required,max=255"`
+    Description *string `json:"description" validate:"omitempty,max=1000"`
+    Active      bool    `json:"active"`
+}
+
+func (r CreateProductRequest) ToServiceModel(accountID string) *models.CreateProductRequest {
+    return &models.CreateProductRequest{
+        AccountID:   accountID,
+        Name:        r.Name,
+        Description: r.Description,
+        Active:      r.Active,
+    }
+}
+
+type ProductResponse struct {
+    ID          string  `json:"id"          example:"prod_2ArTLVPddDx8vZk7CqEbiYp1"`
+    Name        string  `json:"name"`
+    Description *string `json:"description,omitempty"`
+    Active      bool    `json:"active"`
+    CreatedAt   string  `json:"created_at"  example:"2024-01-15T10:00:00Z"`
+    UpdatedAt   string  `json:"updated_at"`
+}
+
+func ProductResponseFromModel(p *models.Product) ProductResponse {
+    return ProductResponse{
+        ID:          p.ID,
+        Name:        p.Name,
+        Description: p.Description,
+        Active:      p.Active,
+        CreatedAt:   p.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+        UpdatedAt:   p.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+    }
+}
+```
+
+## Response Conventions
+
+### Single resource — no envelope
 ```json
 {
   "id": "prod_2ArTLVPddDx8vZk7CqEbiYp1",
@@ -17,10 +226,7 @@ No envelope, returned at root level.
 }
 ```
 
-### Collections
-
-Minimal envelope with pagination.
-
+### Collections — minimal envelope
 ```json
 {
   "data": [
@@ -33,524 +239,229 @@ Minimal envelope with pagination.
 }
 ```
 
-### Errors
-
-Separate structure, never mixed with success.
-
+### Errors — chikit-shaped
+`chikit.SetError` emits the standard shape:
 ```json
 {
   "error": {
-    "type": "invalid_request_error",
-    "code": "validation_error",
+    "type":    "invalid_request_error",
+    "code":    "validation_error",
     "message": "name is required",
-    "param": "name"
+    "param":   "name"
   }
 }
 ```
 
-## Response Helpers
-
-```go
-// internal/api/responder.go
-
-func Success(w http.ResponseWriter, data any) {
-    renderJSON(w, http.StatusOK, data)
-}
-
-func Created(w http.ResponseWriter, data any) {
-    renderJSON(w, http.StatusCreated, data)
-}
-
-func List(w http.ResponseWriter, data any, hasMore bool, nextCursor, prevCursor string) {
-    renderJSON(w, http.StatusOK, NewListResponse(data, hasMore, nextCursor, prevCursor))
-}
-
-func BadRequest(w http.ResponseWriter, r *http.Request, err error, message, param string) {
-    renderError(w, r, http.StatusBadRequest, err, message, param)
-}
-
-func NotFound(w http.ResponseWriter, r *http.Request, err error, message string) {
-    renderError(w, r, http.StatusNotFound, err, message, "")
-}
-
-func InternalError(w http.ResponseWriter, r *http.Request, err error, message string) {
-    renderError(w, r, http.StatusInternalServerError, err, message, "")
+Multi-field validation errors use a `fields` array instead of `param`:
+```json
+{
+  "error": {
+    "type":    "invalid_request_error",
+    "code":    "validation_error",
+    "message": "validation failed",
+    "fields": [
+      { "field": "name", "code": "required", "message": "name is required" },
+      { "field": "description", "code": "max", "message": "description must be at most 1000 characters" }
+    ]
+  }
 }
 ```
 
-## Response Types
+## Error Mapping
+
+Services return domain errors from `internal/errors`. The API layer translates them in one place:
 
 ```go
-// internal/api/response.go
+// internal/api/errors.go
+package api
 
-// ListResponse wraps collection responses with pagination metadata.
-type ListResponse struct {
-    Data       any    `json:"data"`
-    HasMore    bool   `json:"has_more"`
-    NextCursor string `json:"next_cursor,omitempty"`
-    PrevCursor string `json:"prev_cursor,omitempty"`
+import (
+    "errors"
+    "net/http"
+
+    "github.com/nhalm/canonlog"
+    "github.com/nhalm/chikit"
+    apierrors "github.com/yourorg/myapp/internal/errors"
+)
+
+func handleServiceError(r *http.Request, err error) {
+    // Structured validation errors carry per-field details.
+    var validationErr *apierrors.ValidationError
+    if errors.As(err, &validationErr) {
+        fields := make([]chikit.FieldError, len(validationErr.Fields))
+        for i, f := range validationErr.Fields {
+            fields[i] = chikit.FieldError{Param: f.Field, Code: f.Code, Message: f.Message}
+        }
+        chikit.SetError(r, chikit.NewValidationError(fields))
+        return
+    }
+
+    switch {
+    // Client errors — message is safe to show the caller.
+    case errors.Is(err, apierrors.ErrProductNotFound):
+        chikit.SetError(r, chikit.ErrNotFound.With("Product not found"))
+    case errors.Is(err, apierrors.ErrDuplicateName):
+        chikit.SetError(r, chikit.ErrConflict.With("Product with that name already exists"))
+    case errors.Is(err, apierrors.ErrForbidden):
+        chikit.SetError(r, chikit.ErrForbidden.With("Operation not permitted"))
+    case errors.Is(err, apierrors.ErrInvalidInput):
+        chikit.SetError(r, chikit.ErrBadRequest.With("Invalid input"))
+
+    // Server errors — log full detail via canonlog, return a generic response.
+    case errors.Is(err, apierrors.ErrDatabaseFailed),
+        errors.Is(err, apierrors.ErrEncryptionFailed),
+        errors.Is(err, apierrors.ErrDependencyFailed):
+        canonlog.ErrorAdd(r.Context(), err)
+        chikit.SetError(r, chikit.ErrInternal)
+
+    // Custom status codes.
+    case errors.Is(err, apierrors.ErrServiceUnavailable):
+        canonlog.ErrorAdd(r.Context(), err)
+        chikit.SetError(r, &chikit.APIError{
+            Type:    "internal_error",
+            Code:    "service_unavailable",
+            Message: "Service temporarily unavailable",
+            Status:  http.StatusServiceUnavailable,
+        })
+
+    // Unknown — always log the detail, never leak it.
+    default:
+        canonlog.ErrorAdd(r.Context(), err)
+        chikit.SetError(r, chikit.ErrInternal)
+    }
 }
+```
 
-// ErrorResponse represents all API error responses.
-type ErrorResponse struct {
-    Error ErrorDetail `json:"error"`
-}
+Rule of thumb: **client-facing message** → `chikit.SetError(r, chikit.ErrXxx.With(...))`. **Server-side diagnostic** → `canonlog.ErrorAdd(r.Context(), err)` AND a generic `chikit.ErrInternal` / custom `APIError` to the client. Never leak SQL/provider errors to the response body.
 
-// ErrorDetail contains the specifics of an API error.
-type ErrorDetail struct {
-    Type    string `json:"type"`
+The sentinel error values (`ErrProductNotFound`, `ErrDatabaseFailed`, etc.) live in `internal/errors/errors.go`:
+
+```go
+// internal/errors/errors.go
+package errors
+
+import "errors"
+
+var (
+    ErrProductNotFound    = errors.New("product not found")
+    ErrDuplicateName      = errors.New("product with that name already exists")
+    ErrForbidden          = errors.New("operation forbidden")
+    ErrInvalidInput       = errors.New("invalid input")
+    ErrDatabaseFailed     = errors.New("database operation failed")
+    ErrEncryptionFailed   = errors.New("encryption failed")
+    ErrDependencyFailed   = errors.New("upstream dependency failed")
+    ErrServiceUnavailable = errors.New("service temporarily unavailable")
+)
+```
+
+Plus the structured validation error for multi-field responses:
+
+```go
+// internal/errors/validation.go
+package errors
+
+type FieldError struct {
+    Field   string `json:"field"`
     Code    string `json:"code"`
     Message string `json:"message"`
-    Param   string `json:"param,omitempty"`
 }
 
-func NewListResponse(data any, hasMore bool, nextCursor, prevCursor string) *ListResponse {
-    return &ListResponse{
-        Data:       data,
-        HasMore:    hasMore,
-        NextCursor: nextCursor,
-        PrevCursor: prevCursor,
-    }
+type ValidationError struct {
+    Fields []FieldError
 }
 
-func NewErrorResponse(httpStatusCode int, err error, message, param string) *ErrorResponse {
-    errorType := "api_error"
-    if httpStatusCode >= 400 && httpStatusCode < 500 {
-        errorType = "invalid_request_error"
-    }
-
-    errorCode := "unknown_error"
-    if err != nil {
-        errorCode = err.Error()
-    }
-
-    return &ErrorResponse{
-        Error: ErrorDetail{
-            Type:    errorType,
-            Code:    errorCode,
-            Message: message,
-            Param:   param,
-        },
-    }
-}
+func (e *ValidationError) Error() string { /* ... */ }
+func NewValidationError(fields ...FieldError) *ValidationError { return &ValidationError{Fields: fields} }
 ```
 
-## Request/Response Models
+## Custom Validators
+
+`chikit.Binder()` uses `go-playground/validator`. Register custom tags at startup, once, after handler construction but before `Routes(...)`:
 
 ```go
-// internal/api/models.go
-
-// CreateProductRequest represents the request body for creating a product.
-type CreateProductRequest struct {
-    Name        string            `json:"name" validate:"required,max=255"`
-    Description *string           `json:"description" validate:"omitempty,max=1000"`
-    Active      bool              `json:"active"`
-    Metadata    map[string]string `json:"metadata,omitempty"`
-}
-
-// ProductResponse represents a product resource in API responses.
-type ProductResponse struct {
-    ID          string            `json:"id"`
-    Name        string            `json:"name"`
-    Description string            `json:"description"`
-    Active      bool              `json:"active"`
-    Metadata    map[string]string `json:"metadata"`
-    CreatedAt   string            `json:"created_at"`
-    UpdatedAt   string            `json:"updated_at"`
-}
-
-// UpdateProductRequest represents the request body for updating a product.
-type UpdateProductRequest struct {
-    Name        *string           `json:"name" validate:"omitempty,max=255"`
-    Description *string           `json:"description" validate:"omitempty,max=1000"`
-    Active      *bool             `json:"active"`
-    Metadata    map[string]string `json:"metadata,omitempty"`
-}
-```
-
-## Validation
-
-```go
-// internal/api/validator.go
+// internal/api/validators.go
 package api
 
-import (
-    "fmt"
-    "strings"
+import "github.com/nhalm/chikit"
 
-    "github.com/go-playground/validator/v10"
-)
-
-var validate *validator.Validate
-
-func init() {
-    validate = validator.New()
+func RegisterValidators() {
+    chikit.RegisterValidation("format", validateFormat)
+    chikit.RegisterValidation("storage", validateStorage)
 }
 
-func ValidateStruct(s any) error {
-    if err := validate.Struct(s); err != nil {
-        if validationErrors, ok := err.(validator.ValidationErrors); ok {
-            var messages []string
-            for _, fieldError := range validationErrors {
-                messages = append(messages, formatValidationError(fieldError))
-            }
-            return fmt.Errorf("%s", strings.Join(messages, "; "))
-        }
-        return err
-    }
-    return nil
-}
-
-func formatValidationError(err validator.FieldError) string {
-    field := strings.ToLower(err.Field())
-
-    switch err.Tag() {
-    case "required":
-        return fmt.Sprintf("%s is required", field)
-    case "min":
-        return fmt.Sprintf("%s must be at least %s", field, err.Param())
-    case "max":
-        return fmt.Sprintf("%s must be at most %s", field, err.Param())
-    case "oneof":
-        return fmt.Sprintf("%s must be one of: %s", field, err.Param())
-    case "url":
-        return fmt.Sprintf("%s must be a valid URL", field)
-    default:
-        return fmt.Sprintf("%s is invalid", field)
-    }
-}
+func validateFormat(fl validator.FieldLevel) bool { /* ... */ }
 ```
 
-## Routing
-
 ```go
-// internal/api/routes.go
-package api
-
-import (
-    "net/http"
-    "strings"
-    "time"
-
-    "github.com/go-chi/chi/v5"
-    "github.com/go-chi/chi/v5/middleware"
-    "github.com/go-chi/cors"
-    canonhttp "github.com/nhalm/canonlog/http"
-    "github.com/nhalm/chikit/ratelimit"
-    "github.com/nhalm/chikit/ratelimit/store"
-    chikitvalidate "github.com/nhalm/chikit/validate"
-    httpSwagger "github.com/swaggo/http-swagger/v2"
-
-    _ "github.com/yourorg/myapp/docs" // Generated Swagger docs
-)
-
-type RouteConfig struct {
-    ReadRPS        int
-    WriteRPS       int
-    MaxBodyBytes   int64
-    AllowedOrigins []string
-}
-
-func DefaultRouteConfig() RouteConfig {
-    return RouteConfig{
-        ReadRPS:        100,
-        WriteRPS:       20,
-        MaxBodyBytes:   1048576,
-        AllowedOrigins: []string{"http://localhost:5173"},
-    }
-}
-
-func (h *Handler) Routes() http.Handler {
-    return h.RoutesWithConfig(DefaultRouteConfig())
-}
-
-func (h *Handler) RoutesWithConfig(config RouteConfig) http.Handler {
-    r := chi.NewRouter()
-
-    st := store.NewMemory()
-
-    readLimiter := ratelimit.NewBuilder(st).
-        WithName("read").
-        WithIP().
-        Limit(config.ReadRPS, time.Second)
-
-    writeLimiter := ratelimit.NewBuilder(st).
-        WithName("write").
-        WithIP().
-        Limit(config.WriteRPS, time.Second)
-
-    r.Use(middleware.RequestID)
-    r.Use(middleware.RealIP)
-    r.Use(canonhttp.ChiMiddleware(nil))
-    r.Use(chikitvalidate.MaxBodySize(config.MaxBodyBytes))
-    r.Use(middleware.Recoverer)
-    r.Use(middleware.Timeout(60 * time.Second))
-
-    r.Use(cors.Handler(cors.Options{
-        AllowedOrigins:   config.AllowedOrigins,
-        AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
-        AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-        ExposedHeaders:   []string{"Link"},
-        AllowCredentials: true,
-        MaxAge:           300,
-    }))
-
-    r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-        w.WriteHeader(http.StatusOK)
-        _, _ = w.Write([]byte("OK"))
-    })
-
-    r.Get("/swagger/*", httpSwagger.WrapHandler)
-
-    r.Route("/api/v1", func(r chi.Router) {
-        r.Group(func(r chi.Router) {
-            r.Use(readLimiter)
-            r.Get("/products", h.ListProducts)
-            r.Get("/products/{id}", h.GetProduct)
-        })
-
-        r.Group(func(r chi.Router) {
-            r.Use(writeLimiter)
-            r.Post("/products", h.CreateProduct)
-            r.Patch("/products/{id}", h.UpdateProduct)
-            r.Delete("/products/{id}", h.DeleteProduct)
-        })
-    })
-
-    return r
-}
-
-func ParseAllowedOrigins(originsStr string) []string {
-    if originsStr == "" {
-        return []string{"http://localhost:5173"}
-    }
-    origins := strings.Split(originsStr, ",")
-    for i, origin := range origins {
-        origins[i] = strings.TrimSpace(origin)
-    }
-    return origins
-}
+// cmd/<app>/serve.go
+api.RegisterValidators()
+handler := api.NewHandler(...)
+router := api.Routes(handler, rateLimitStore)
 ```
 
-## Complete Handler Example
+## Pagination
+
+Cursor-based — never offset. The repository layer returns a `PaginationResult[T]` from a skimatik `:paginated` query; the handler maps it to the collection envelope:
 
 ```go
-// internal/api/handler.go
-package api
-
-import (
-    "context"
-    "encoding/json"
-    "net/http"
-    "strconv"
-
-    "github.com/go-chi/chi/v5"
-    "github.com/nhalm/canonlog"
-    "github.com/yourorg/myapp/internal/models"
-)
-
-// ProductService defines only the methods the API layer needs from the product service.
-type ProductService interface {
-    CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-    GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error)
-    UpdateProduct(ctx context.Context, req *models.UpdateProductRequest) (*models.Product, error)
-    DeleteProduct(ctx context.Context, params models.DeleteProductParams) error
-    ListProducts(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error)
-}
-
-type Handler struct {
-    productSvc ProductService
-}
-
-func NewHandler(productSvc ProductService) *Handler {
-    return &Handler{
-        productSvc: productSvc,
-    }
-}
-
-func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
-    var req CreateProductRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        BadRequest(w, r, err, "invalid request body", "")
-        return
-    }
-
-    if err := ValidateStruct(req); err != nil {
-        BadRequest(w, r, err, err.Error(), "")
-        return
-    }
-
-    canonlog.AddRequestFields(r.Context(), map[string]any{
-        "product_name": req.Name,
-    })
-
-    serviceReq := models.CreateProductRequest{
-        Name:        req.Name,
-        Description: req.Description,
-        Active:      req.Active,
-        Metadata:    req.Metadata,
-    }
-
-    product, err := h.productSvc.CreateProduct(r.Context(), &serviceReq)
-    if err != nil {
-        handleServiceError(w, r, err)
-        return
-    }
-
-    Created(w, convertToProductResponse(product))
-}
-
 func (h *Handler) ListProducts(w http.ResponseWriter, r *http.Request) {
-    limit := 10
-    if l := r.URL.Query().Get("limit"); l != "" {
-        if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
-            limit = parsed
-        }
-    }
+    val, _ := chikit.HeaderFromContext(r.Context(), "account_id")
+    accountID := val.(string)
 
-    var active *bool
-    if a := r.URL.Query().Get("active"); a != "" {
-        b := a == "true"
-        active = &b
-    }
-
-    filter := models.ListProductsFilter{
-        Active:        active,
-        Limit:         limit,
-        StartingAfter: ptrOrNil(r.URL.Query().Get("starting_after")),
-    }
-
-    result, err := h.productSvc.ListProducts(r.Context(), filter)
+    filter, err := parseListFilter(r, accountID)
     if err != nil {
-        handleServiceError(w, r, err)
+        chikit.SetError(r, chikit.ErrBadRequest.With(err.Error()))
+        return
+    }
+
+    result, err := h.productService.ListProducts(r.Context(), filter)
+    if err != nil {
+        handleServiceError(r, err)
         return
     }
 
     responses := make([]ProductResponse, len(result.Products))
     for i, p := range result.Products {
-        responses[i] = convertToProductResponse(p)
+        responses[i] = ProductResponseFromModel(p)
     }
 
-    var nextCursor, prevCursor string
-    if result.NextCursor != nil {
-        nextCursor = *result.NextCursor
-    }
-    if result.PrevCursor != nil {
-        prevCursor = *result.PrevCursor
-    }
-
-    List(w, responses, result.HasMore, nextCursor, prevCursor)
-}
-
-func (h *Handler) GetProduct(w http.ResponseWriter, r *http.Request) {
-    id := chi.URLParam(r, "id")
-
-    product, err := h.productSvc.GetProduct(r.Context(), models.GetProductParams{
-        ProductID: id,
+    chikit.SetResponse(r, http.StatusOK, ListResponse[ProductResponse]{
+        Data:       responses,
+        HasMore:    result.HasMore,
+        NextCursor: ptrOrEmpty(result.NextCursor),
+        PrevCursor: ptrOrEmpty(result.PrevCursor),
     })
-    if err != nil {
-        handleServiceError(w, r, err)
-        return
-    }
-
-    Success(w, convertToProductResponse(product))
 }
 
-func (h *Handler) UpdateProduct(w http.ResponseWriter, r *http.Request) {
-    id := chi.URLParam(r, "id")
-
-    var req UpdateProductRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        BadRequest(w, r, err, "invalid request body", "")
-        return
-    }
-
-    if err := ValidateStruct(req); err != nil {
-        BadRequest(w, r, err, err.Error(), "")
-        return
-    }
-
-    serviceReq := models.UpdateProductRequest{
-        ID:          id,
-        Name:        req.Name,
-        Description: req.Description,
-        Active:      req.Active,
-        Metadata:    req.Metadata,
-    }
-
-    product, err := h.productSvc.UpdateProduct(r.Context(), &serviceReq)
-    if err != nil {
-        handleServiceError(w, r, err)
-        return
-    }
-
-    Success(w, convertToProductResponse(product))
-}
-
-func (h *Handler) DeleteProduct(w http.ResponseWriter, r *http.Request) {
-    id := chi.URLParam(r, "id")
-
-    if err := h.productSvc.DeleteProduct(r.Context(), models.DeleteProductParams{
-        ProductID: id,
-    }); err != nil {
-        handleServiceError(w, r, err)
-        return
-    }
-
-    w.WriteHeader(http.StatusNoContent)
-}
-
-func convertToProductResponse(product *models.Product) ProductResponse {
-    var description string
-    if product.Description != nil {
-        description = *product.Description
-    }
-
-    return ProductResponse{
-        ID:          product.ID,
-        Name:        product.Name,
-        Description: description,
-        Active:      product.Active,
-        Metadata:    product.Metadata,
-        CreatedAt:   product.CreatedAt.Format("2006-01-02T15:04:05Z"),
-        UpdatedAt:   product.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-    }
-}
-
-func ptrOrNil(s string) *string {
-    if s == "" {
-        return nil
-    }
-    return &s
+type ListResponse[T any] struct {
+    Data       []T    `json:"data"`
+    HasMore    bool   `json:"has_more"`
+    NextCursor string `json:"next_cursor,omitempty"`
+    PrevCursor string `json:"prev_cursor,omitempty"`
 }
 ```
 
-## Swagger Annotations
+## Swagger
 
-Add Swagger annotations to handlers for OpenAPI documentation.
+Annotate handlers with standard swaggo tags. Generate with `make swagger` (`swag init -g cmd/<app>/main.go -o docs`).
 
 ```go
-// main.go
-// @title My API
-// @version 1.0
-// @description API description
-// @host localhost:8080
-// @BasePath /api/v1
-
-// API models (internal/api/models.go)
-// @Description Request payload for creating a product
-type CreateProductRequest struct {
-    // Name of the product
-    // @example "Premium Plan"
-    Name string `json:"name" validate:"required,max=255"`
-
-    // Optional description
-    // @example "Full access to all features"
-    Description string `json:"description" validate:"max=1000"`
-}
+// CreateProduct godoc
+// @Summary     Create a new product
+// @Tags        Products
+// @Accept      json
+// @Produce     json
+// @Param       X-Account-ID header  string                true "Account ID"
+// @Param       request      body    CreateProductRequest  true "Product fields"
+// @Success     201 {object} ProductResponse
+// @Failure     400 {object} chikit.ValidationErrorResponse
+// @Failure     401 {object} chikit.ErrorResponse "Missing X-Account-ID"
+// @Failure     409 {object} chikit.ErrorResponse "Duplicate name"
+// @Failure     500 {object} chikit.ErrorResponse
+// @Router      /v1/products [post]
+func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) { /* ... */ }
 ```
 
-Generate with:
-```bash
-swag init -g cmd/myapp/main.go -o docs
-```
+## Working Reference
+
+See cloak's `internal/api/` for a full implementation of every pattern above — `routes.go` for the middleware stack, `aliases.go` / `cards.go` / `cardholders.go` for handlers, `errors.go` for the full error map, `validators.go` for custom tag registration.
