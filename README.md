@@ -29,7 +29,8 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 | [chikit](https://github.com/nhalm/chikit) | Chi middleware: canonlog context, timeout, rate limit, body size, header extraction, JSON binding, response writing | v1.0+ |
 | [canonlog](https://github.com/nhalm/canonlog) | Canonical per-request logging | v0.3+ |
 | [golang-migrate](https://github.com/golang-migrate/migrate) | SQL migrations | v4 |
-| [cobra](https://github.com/spf13/cobra) + [viper](https://github.com/spf13/viper) | CLI framework + env/file config | latest |
+| [cobra](https://github.com/spf13/cobra) | CLI framework — subcommands (`serve`, `migrate up`, `migrate down`, etc.) | latest |
+| [viper](https://github.com/spf13/viper) | Config loader — reads `.env` files and environment variables; backs `config.Load()` | latest |
 | [chi](https://github.com/go-chi/chi) | HTTP router | v5 |
 | [testify](https://github.com/stretchr/testify), [gomock](https://pkg.go.dev/go.uber.org/mock) | Testing | latest |
 | [ksuid](https://github.com/segmentio/ksuid) | Time-ordered IDs | latest |

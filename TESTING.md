@@ -297,6 +297,54 @@ func TestProductRepository_CRUD(t *testing.T) {
 }
 ```
 
+## Query-Plan Regression — pgxkit Golden Testing
+
+pgxkit's golden testing captures the `EXPLAIN` plan of a query and compares it against a stored baseline. Use it for queries where performance is load-bearing (hot path, reports, anything that would become an N+1 if someone swapped an index or moved a join).
+
+```go
+func TestListProductsPaginated_QueryPlan(t *testing.T) {
+    if testing.Short() { t.Skip("skipping integration test") }
+
+    ctx := context.Background()
+    testDB := pgxkit.RequireDB(t)
+    defer testDB.Shutdown(ctx)
+
+    // Wrap the db handle so every query run through it is captured for
+    // comparison against the golden file at testdata/golden/<TestName>.json.
+    db := testDB.EnableGolden("TestListProductsPaginated_QueryPlan")
+
+    rows, err := db.Query(ctx,
+        "SELECT id, name FROM products WHERE account_id = $1 AND deleted_at IS NULL ORDER BY id LIMIT $2",
+        "acc_test", 20,
+    )
+    require.NoError(t, err)
+    defer rows.Close()
+    for rows.Next() { /* drain */ }
+    require.NoError(t, rows.Err())
+
+    // Compares against testdata/golden/TestListProductsPaginated_QueryPlan.json.
+    // First run of a test creates the file; subsequent runs diff against it.
+    db.AssertGolden(t, "TestListProductsPaginated_QueryPlan")
+}
+```
+
+**Workflow:**
+1. First run creates `testdata/golden/TestListProductsPaginated_QueryPlan.json` with the captured plan. Commit it alongside the test.
+2. Subsequent runs diff against it — if a migration drops an index or someone rewrites the query, the test fails and shows the plan diff.
+3. After an intentional plan change, refresh the baseline:
+   ```bash
+   cp testdata/golden/TestListProductsPaginated_QueryPlan.json \
+      testdata/golden/TestListProductsPaginated_QueryPlan.json.baseline
+   ```
+   Then review the diff before committing.
+
+**Limits and caveats:**
+- DML queries (`INSERT`/`UPDATE`/`DELETE`) are captured inside a rolled-back transaction so `EXPLAIN` doesn't mutate the DB.
+- `EXPLAIN` queries themselves are skipped to avoid recursion.
+- Tests using `EnableGolden` can run `t.Parallel()` — each gets its own wrapped handle.
+
+Not every integration test needs this. Reach for it on queries where an unnoticed plan regression would actually hurt, not on trivial CRUD round-trips.
+
 ## What Not to Test
 
 - **Generated code** — trust skimatik. If skimatik generates wrong code, that's a bug against skimatik.
