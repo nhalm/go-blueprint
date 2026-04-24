@@ -346,6 +346,7 @@ func TestProductRepository_ListWithFilters_QueryPlan(t *testing.T) {
 - DML operations (the `Create`, `Update`, `Delete` paths the repo exposes) are captured inside a rolled-back transaction so `EXPLAIN` doesn't mutate the DB.
 - `EXPLAIN` queries themselves are skipped to avoid recursion.
 - Tests using `EnableGolden` can run `t.Parallel()` — each gets its own wrapped handle.
+- **Use the `*pgxkit.DB` returned by `EnableGolden` everywhere the repo might touch the db — not `testDB.DB`.** `EnableGolden` builds a *new* `*pgxkit.DB` that shares the underlying read/write pools but owns its own hook chain with the plan-capture hook attached. Queries through `testDB.DB` bypass the hook and are not recorded, so `AssertGolden` will see an empty capture and silently create a blank baseline.
 
 Reach for this on repository methods where an unnoticed plan regression would hurt (paginated list endpoints, joined reports, account-scoped queries over large tables). Skip it on trivial single-row `GetByID` round-trips.
 
