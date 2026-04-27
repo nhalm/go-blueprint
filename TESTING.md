@@ -82,14 +82,7 @@ func TestProductRepository_CRUD(t *testing.T) {
 - Calls `t.Skip` if the env var is unset or the DB is unreachable — so unit-only runs don't fail.
 - Registers shutdown cleanup via `t.Cleanup` — do not call `db.Shutdown` manually.
 
-**CI:** `TEST_DATABASE_URL` must be set before the test run. If it's missing (wrong secret name, misconfigured job), `RequireDB` silently skips every integration test and the suite reports all-pass. Add a CI step that fails fast if the variable is absent:
-
-```yaml
-- name: Check TEST_DATABASE_URL
-  run: test -n "$TEST_DATABASE_URL"
-  env:
-    TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
-```
+**CI:** `TEST_DATABASE_URL` must be set before the test run. If it's missing (misconfigured secret, wrong env var name), `RequireDB` silently skips every integration test and the suite reports all-pass. Verify the variable is present as an explicit CI step before running tests.
 
 For test isolation prefer a rolled-back transaction over per-test TRUNCATE:
 
@@ -182,36 +175,18 @@ gomock.InOrder(
 
 ## Service Tests — TxManager
 
-Service methods that span multiple repositories in a transaction take a `TxManager` dependency. Test these by mocking `TxManager` alongside the repos:
+Service methods that span multiple repos in a transaction take a `TxManager` dependency. Mock it alongside the repos. `BeginTx` returns `(txCtx, commit, rollback, error)` — the mock returns a context and no-op functions. Assert that repo mocks receive `txCtx` (not the original `ctx`), which proves they're seeing the same transaction:
 
 ```go
-func TestProductService_CreateWithAudit(t *testing.T) {
-    ctrl        := gomock.NewController(t)
-    mockProducts := NewMockProductRepository(ctrl)
-    mockAudit    := NewMockAuditRepository(ctrl)
-    mockTx       := NewMockTxManager(ctrl)
+mockTx.EXPECT().
+    BeginTx(gomock.Any()).
+    Return(txCtx, commitFn, rollbackFn, nil)
 
-    txCtx    := context.WithValue(context.Background(), repository.TxContextKey{}, "tx")
-    commit   := func() error                    { return nil }
-    rollback := func(context.Context) error     { return nil }
-
-    mockTx.EXPECT().
-        BeginTx(gomock.Any()).
-        Return(txCtx, commit, rollback, nil)
-    mockProducts.EXPECT().
-        Create(txCtx, gomock.Any()).
-        Return(models.Product{Name: "test"}, nil)
-    mockAudit.EXPECT().
-        Create(txCtx, gomock.Any()).
-        Return(nil)
-
-    svc := service.NewProductService(mockProducts, mockAudit, mockTx, config.Config{})
-    _, err := svc.CreateWithAudit(context.Background(), models.CreateProductRequest{Name: "test"})
-    require.NoError(t, err)
-}
+mockProducts.EXPECT().Create(txCtx, gomock.Any()).Return(models.Product{}, nil)
+mockAudit.EXPECT().Create(txCtx, gomock.Any()).Return(nil)
 ```
 
-Test the rollback path by having one of the repo mocks return an error — verify that the service returns the error and that commit is never called.
+Test the rollback path by having one repo mock return an error — verify the service returns the error and `commit` is never called.
 
 ## Handler Tests — Mount the Production Middleware
 
@@ -419,109 +394,11 @@ Reach for this on repository methods where an unnoticed plan regression would hu
 
 ## Shared Test Fixtures — `internal/testutil/`
 
-`internal/testutil/` is for fixture factories shared across multiple test packages — not a `GetTestDB` helper (that's `pgxkit.RequireDB`). A fixture factory creates a domain entity with sensible defaults and returns it:
-
-```go
-// internal/testutil/fixtures.go
-package testutil
-
-func CreateProduct(t *testing.T, db *pgxkit.DB, overrides ...func(*models.CreateProductRequest)) models.Product {
-    t.Helper()
-    req := models.CreateProductRequest{
-        AccountID: uuid.New(),
-        Name:      "fixture-product-" + uuid.New().String()[:8],
-        Active:    true,
-    }
-    for _, fn := range overrides {
-        fn(&req)
-    }
-    repo := repository.NewProductRepository(db)
-    product, err := repo.Create(context.Background(), req)
-    require.NoError(t, err)
-    return product
-}
-```
-
-Use the override pattern to customize only the fields that matter for a given test:
-
-```go
-product := testutil.CreateProduct(t, db, func(r *models.CreateProductRequest) {
-    r.Active = false
-})
-```
-
-Keep `testutil/` lean. If a fixture is only used in one package's tests, define it inline there. Move it to `testutil/` when two or more test packages need the same setup.
+`internal/testutil/` holds fixture factories shared across test packages — not a `GetTestDB` helper (that's `pgxkit.RequireDB`). A factory creates a domain entity with sensible defaults and accepts override functions for fields that vary per test. If a fixture is only used in one package, define it inline there — move it to `testutil/` when two or more packages need the same setup.
 
 ## E2E Tests
 
-E2E tests live in `test/e2e/` and exercise the full stack — real DB, real HTTP, no mocks. `setup_test.go` spins up the server once per package run:
-
-```go
-// test/e2e/setup_test.go
-package e2e
-
-var testServer *httptest.Server
-var testDB     *pgxkit.DB
-
-func TestMain(m *testing.M) {
-    ctx := context.Background()
-
-    testDB = pgxkit.RequireDB(nil) // nil = use os.Exit on failure, not t.Skip
-    cfg   := config.Config{
-        DatabaseURL:         os.Getenv("TEST_DATABASE_URL"),
-        HTTPRequestTimeout:  10 * time.Second,
-        MaxRequestBodyBytes: 1024 * 1024,
-    }
-
-    productRepo := repository.NewProductRepository(testDB)
-    productSvc  := service.NewProductService(productRepo, cfg)
-    handler     := api.NewHandler(productSvc, testDB, cfg)
-    router      := api.Routes(handler, store.NewMemory())
-
-    testServer = httptest.NewServer(router)
-    defer testServer.Close()
-
-    os.Exit(m.Run())
-}
-```
-
-Each test seeds state through the API and asserts through the API — no direct DB writes:
-
-```go
-// test/e2e/products_test.go
-func TestCreateAndGetProduct(t *testing.T) {
-    client := testServer.Client()
-    base   := testServer.URL
-
-    // Seed via POST
-    body, _ := json.Marshal(api.CreateProductRequest{Name: "e2e-product", Active: true})
-    req, _  := http.NewRequest(http.MethodPost, base+"/v1/products", bytes.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("X-Account-ID", "acc_e2e_test")
-
-    resp, err := client.Do(req)
-    require.NoError(t, err)
-    require.Equal(t, http.StatusCreated, resp.StatusCode)
-
-    var created api.ProductResponse
-    require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
-
-    // Assert via GET
-    req, _ = http.NewRequest(http.MethodGet, base+"/v1/products/"+created.ID, nil)
-    req.Header.Set("X-Account-ID", "acc_e2e_test")
-
-    resp, err = client.Do(req)
-    require.NoError(t, err)
-    require.Equal(t, http.StatusOK, resp.StatusCode)
-
-    var fetched api.ProductResponse
-    require.NoError(t, json.NewDecoder(resp.Body).Decode(&fetched))
-    assert.Equal(t, created.ID, fetched.ID)
-    assert.Equal(t, "e2e-product", fetched.Name)
-}
-```
-
-E2E tests are slow and require a real DB — gate them with `testing.Short()` the same way repository tests are.
+`test/e2e/` exercises the full stack — real DB, real HTTP, no mocks. `setup_test.go` wires the real dependency graph (repos → services → handler → router) and starts an `httptest.Server` via `TestMain`. Each test seeds state through the API and asserts through the API — no direct DB writes, so tests exercise the full request path including auth headers and ID encoding. Gate with `testing.Short()` the same way repository tests are.
 
 ## What Not to Test
 
