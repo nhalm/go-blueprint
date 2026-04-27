@@ -222,29 +222,42 @@ Key points:
 
 ## shortuuid on the Wire
 
-IDs travel over the wire as 22-character base62 strings, via `github.com/nhalm/shortuuid`. Internally every layer below the handler uses `uuid.UUID`.
+IDs travel over the wire as prefixed 22-character base62 strings: `prod_2s8gNnj9C5Ubkx4T7W5vZk`. The prefix is the entity type; the suffix is the shortuuid encoding of the internal UUIDv7. Internally every layer below the handler uses `uuid.UUID`.
+
+Prefix constants live in `internal/models` alongside the entity they identify:
 
 ```go
-import "github.com/nhalm/shortuuid"
+// internal/models/product.go
+const PrefixProduct = "prod_"
+```
 
-// Inbound — path param, header, JSON body
-productID, err := shortuuid.ExpandUUID(chi.URLParam(r, "id"))
+```go
+import (
+    "strings"
+
+    "github.com/nhalm/shortuuid"
+    "github.com/yourorg/myapp/internal/models"
+)
+
+// Inbound — strip prefix, then expand
+raw := chi.URLParam(r, "id") // "prod_2s8gNnj9C5Ubkx4T7W5vZk"
+productID, err := shortuuid.ExpandUUID(strings.TrimPrefix(raw, models.PrefixProduct))
 if err != nil {
     chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid product id", "id"))
     return
 }
 
-// Outbound — response struct, List cursor
+// Outbound — shorten, then prepend prefix
 short, _ := shortuuid.ShortenUUID(product.ID)
-// short -> "2s8gNnj9C5Ubkx4T7W5vZk"
+id := models.PrefixProduct + short // "prod_2s8gNnj9C5Ubkx4T7W5vZk"
 ```
 
 A small helper on the response type keeps encoding in one place:
 
 ```go
 type ProductResponse struct {
-    ID        string `json:"id"         example:"2s8gNnj9C5Ubkx4T7W5vZk"`
-    AccountID string `json:"account_id" example:"2s8gNnj9C5Ubkx4T7W5vZk"`
+    ID        string `json:"id"         example:"prod_2s8gNnj9C5Ubkx4T7W5vZk"`
+    AccountID string `json:"account_id" example:"acc_2s8gNnj9C5Ubkx4T7W5vZk"`
     // ...
 }
 
@@ -252,8 +265,8 @@ func ProductResponseFromModel(p models.Product) ProductResponse {
     id, _       := shortuuid.ShortenUUID(p.ID)
     accountID, _ := shortuuid.ShortenUUID(p.AccountID)
     return ProductResponse{
-        ID:        id,
-        AccountID: accountID,
+        ID:        models.PrefixProduct + id,
+        AccountID: models.PrefixAccount + accountID,
         // ...
     }
 }
@@ -284,7 +297,7 @@ func (r CreateProductRequest) ToServiceModel(accountID string) models.CreateProd
 }
 
 type ProductResponse struct {
-    ID          string  `json:"id"          example:"2s8gNnj9C5Ubkx4T7W5vZk"`
+    ID          string  `json:"id"          example:"prod_2s8gNnj9C5Ubkx4T7W5vZk"`
     Name        string  `json:"name"`
     Description *string `json:"description,omitempty"`
     Active      bool    `json:"active"`
@@ -295,7 +308,7 @@ type ProductResponse struct {
 func ProductResponseFromModel(p models.Product) ProductResponse {
     id, _ := shortuuid.ShortenUUID(p.ID)
     return ProductResponse{
-        ID:          id,
+        ID:          models.PrefixProduct + id,
         Name:        p.Name,
         Description: p.Description,
         Active:      p.Active,
@@ -310,7 +323,7 @@ func ProductResponseFromModel(p models.Product) ProductResponse {
 ### Single resource — no envelope
 ```json
 {
-  "id": "2s8gNnj9C5Ubkx4T7W5vZk",
+  "id": "prod_2s8gNnj9C5Ubkx4T7W5vZk",
   "name": "Premium Plan",
   "active": true,
   "created_at": "2025-01-15T10:30:00Z"
@@ -321,12 +334,12 @@ func ProductResponseFromModel(p models.Product) ProductResponse {
 ```json
 {
   "data": [
-    { "id": "2s8gNnj9C5Ubkx4T7W5vZk", "name": "Plan A" },
-    { "id": "4RfK9mBvL3XpN2wYq8aEcT", "name": "Plan B" }
+    { "id": "prod_2s8gNnj9C5Ubkx4T7W5vZk", "name": "Plan A" },
+    { "id": "prod_4RfK9mBvL3XpN2wYq8aEcT", "name": "Plan B" }
   ],
   "has_more": true,
-  "next_cursor": "4RfK9mBvL3XpN2wYq8aEcT",
-  "prev_cursor": "2s8gNnj9C5Ubkx4T7W5vZk"
+  "next_cursor": "prod_4RfK9mBvL3XpN2wYq8aEcT",
+  "prev_cursor": "prod_2s8gNnj9C5Ubkx4T7W5vZk"
 }
 ```
 

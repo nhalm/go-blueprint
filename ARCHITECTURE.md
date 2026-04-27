@@ -187,16 +187,16 @@ Don't duplicate. Structural validation only in the API layer, business validatio
 
 ## ID Strategy — UUIDv7 + shortuuid
 
-Primary keys are **UUIDv7** generated app-side by skimatik, stored in Postgres `UUID` columns, carried through Go as `uuid.UUID`, and encoded as 22-char base62 **shortuuid** strings on the wire.
+Primary keys are **UUIDv7** generated app-side by skimatik, stored in Postgres `UUID` columns, carried through Go as `uuid.UUID`, and encoded as prefixed 22-char base62 **shortuuid** strings on the wire.
 
 ```
 internal:  01903abc-1234-7def-8000-abcdef012345    (uuid.UUID field, UUID column)
-wire:      2s8gNnj9C5Ubkx4T7W5vZk                  (shortuuid-encoded JSON + URL params)
+wire:      prod_2s8gNnj9C5Ubkx4T7W5vZk             (prefix + shortuuid, JSON + URL params)
 ```
 
 **Why UUIDv7 over KSUID or UUIDv4**: the first 48 bits are a millisecond timestamp, so rows insert in roughly monotonic order — tight B-tree index locality, like KSUID, but as a standards-compliant UUID that every tool understands. No Postgres extensions required; generation happens in Go via `google/uuid`.
 
-**Why shortuuid on the wire**: 22 chars vs 36, round-trips losslessly, URL-safe, preserves the UUID version. Internal code never sees the short form — handlers decode on the way in and encode on the way out.
+**Why prefixed shortuuid on the wire**: 22-char base62 is compact and URL-safe; the entity prefix (`prod_`, `acc_`) makes IDs self-documenting in logs, URLs, and client code. Internal code never sees the short form — handlers decode on the way in and encode on the way out. Prefix constants live in `internal/models` alongside the entity they identify.
 
 **How skimatik sets it up.** The generated package exposes a `UUIDv7()` helper. Generated `Create*` methods call the ID generator function passed to the repo constructor — passing `nil` activates the default UUIDv7 generator:
 
