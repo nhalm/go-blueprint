@@ -15,6 +15,10 @@ Each layer translates errors into its own vocabulary — the API layer never imp
 
 ## `internal/errors` — Domain Sentinels + ValidationError
 
+Sentinel errors are package-level `var` values compared with `errors.Is`. Because `errors.Is` unwraps the error chain, a service can wrap a sentinel with additional context (`fmt.Errorf("creating product: %w", apierrors.ErrDuplicateName)`) and the API layer's `handleServiceError` will still match it correctly. This means layers can add context without breaking the translation chain.
+
+Sentinels also keep error handling declarative — `handleServiceError` is a single switch rather than string matching or type assertions scattered across handlers. Adding a new error condition means adding one sentinel and one case; nothing else changes.
+
 The foundation imported by every layer:
 
 ```go
