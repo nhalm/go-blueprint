@@ -7,13 +7,13 @@ Layer structure, package responsibilities, and dependency flow.
 ```
 cmd/<app>/                  # Cobra entry point — one command per file
   ├── main.go               # Executes root.Execute()
-  ├── root.go               # Root cobra.Command, initConfig (viper .env + AutomaticEnv)
-  ├── serve.go              # runServe — loads Config, wires deps, runs HTTP server
-  ├── migrate.go            # runMigrateUp/Down/Version — uses config.LoadDatabaseOnly()
+  ├── root.go               # Root cobra.Command — registers subcommands only
+  ├── serve.go              # runServe — loads config, wires deps, runs HTTP server
+  ├── migrate.go            # runMigrateUp/Down/Version — uses config.LoadLogging + config.LoadDatabase
   └── <other>.go            # Additional commands (cleanup jobs, docs generator, etc.)
 
 internal/
-  ├── config/               # Typed Config struct + Load() / LoadDatabaseOnly()
+  ├── config/               # Typed Config struct + composable group loaders (LoadLogging, LoadDatabase, LoadHTTP, LoadRedis)
   ├── models/               # Domain entities + input/output types (no internal deps)
   ├── repository/           # Data access — embeds skimatik-generated code
   │   ├── generated/        # skimatik output (may be git-ignored)
@@ -120,11 +120,18 @@ No DI framework. Each command's `RunE` wires dependencies top-down. Reading `ser
 func runServe(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
 
-    cfg, err := config.Load()
-    if err != nil {
-        return fmt.Errorf("failed to load config: %w", err)
+    var cfg config.Config
+    if err := config.LoadLogging(&cfg); err != nil {
+        return err
     }
     canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
+
+    if err := config.LoadDatabase(&cfg); err != nil {
+        return err
+    }
+    if err := config.LoadHTTP(&cfg); err != nil {
+        return err
+    }
 
     db := pgxkit.NewDB()
     if err := db.Connect(ctx, cfg.DatabaseURL,
@@ -222,7 +229,7 @@ repo := &ProductRepository{
 }
 ```
 
-No `internal/id` package. No entity prefixes. See [DATABASE.md](DATABASE.md#id-generation) for the full repository pattern and [API.md](API.md#shortuuid-on-the-wire) for the handler-side encoding.
+No `internal/id` package. Entity prefix constants (`PrefixProduct = "prod_"`) live in `internal/models` and are applied at the handler boundary only — not stored, not seen by lower layers. See [DATABASE.md](DATABASE.md#id-generation) for the full repository pattern and [API.md](API.md#shortuuid-on-the-wire) for the handler-side encoding.
 
 ## What Does Not Belong in `internal/`
 
