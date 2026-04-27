@@ -19,6 +19,7 @@ package config
 
 import (
     "encoding/hex"
+    "errors"
     "fmt"
     "slices"
     "time"
@@ -58,6 +59,10 @@ type Config struct {
 
 ```go
 func Load() (Config, error) {
+    if err := readConfig(); err != nil {
+        return Config{}, err
+    }
+
     databaseURL := viper.GetString("DATABASE_URL")
     if databaseURL == "" {
         return Config{}, fmt.Errorf("DATABASE_URL is required")
@@ -108,6 +113,10 @@ func Load() (Config, error) {
 }
 
 func LoadDatabaseOnly() (Config, error) {
+    if err := readConfig(); err != nil {
+        return Config{}, err
+    }
+
     databaseURL := viper.GetString("DATABASE_URL")
     if databaseURL == "" {
         return Config{}, fmt.Errorf("DATABASE_URL is required")
@@ -137,6 +146,19 @@ var validLogFormats = []string{"text", "json"}
 
 func isValidLogLevel(l string)  bool { return slices.Contains(validLogLevels, l) }
 func isValidLogFormat(f string) bool { return slices.Contains(validLogFormats, f) }
+
+func readConfig() error {
+    viper.SetConfigFile(".env")
+    viper.SetConfigType("env")
+    viper.AutomaticEnv()
+    if err := viper.ReadInConfig(); err != nil {
+        var notFound viper.ConfigFileNotFoundError
+        if !errors.As(err, &notFound) {
+            return fmt.Errorf("failed to read config file: %w", err)
+        }
+    }
+    return nil
+}
 ```
 
 For opaque values like encryption keys, put the decode/length check in a helper:
@@ -156,7 +178,7 @@ func loadHexKey(envVar string) ([]byte, error) {
 
 ## Command Usage
 
-Each command's `RunE` calls the appropriate loader first, sets up canonlog, then does its work. Nothing should log before `canonlog.SetupGlobalLogger` — if it has to, see [logging during CLI commands](#logging-during-cli-commands) below.
+Each command's `RunE` calls the appropriate loader first, sets up canonlog, then does its work. Nothing should log before `canonlog.SetupGlobalLogger`.
 
 ### `serve`
 
@@ -229,47 +251,29 @@ func runMigrateUp(cmd *cobra.Command, args []string) error {
 
 ## Viper Wiring — `root.go`
 
-`cobra.OnInitialize(initConfig)` runs once, before any subcommand's `RunE`. It only sets up viper — **no canonlog setup here**, no required-field validation here.
+`root.go` is a pure entry point — it registers subcommands and nothing else. Viper setup happens inside each loader, so errors propagate as return values rather than being swallowed in a `cobra.OnInitialize` callback.
 
 ```go
 // cmd/<app>/root.go
-var cfgFile string
-
 var rootCmd = &cobra.Command{
     Use:   "myapp",
     Short: "My application",
 }
 
 func init() {
-    cobra.OnInitialize(initConfig)
     rootCmd.AddCommand(serveCmd)
     rootCmd.AddCommand(migrateCmd)
     // ... other commands ...
-}
-
-func initConfig() {
-    if cfgFile != "" {
-        viper.SetConfigFile(cfgFile)
-    } else {
-        viper.SetConfigFile(".env")
-        viper.SetConfigType("env")
-    }
-    viper.AutomaticEnv()
-    if err := viper.ReadInConfig(); err == nil {
-        fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
-    }
 }
 ```
 
 ## Logging During CLI Commands
 
-Runtime application logging must go through canonlog — see [observability conventions](ARCHITECTURE.md). Two narrow exceptions:
+Runtime application logging must go through canonlog — see [observability conventions](ARCHITECTURE.md). One narrow exception:
 
-1. **Pre-canonlog**: the `"Using config file: ..."` note in `initConfig` goes to `stderr` via `fmt.Fprintln`. That runs before any subcommand has loaded its config, so canonlog isn't set up yet.
+**Interactive CLI feedback**: after the structured canonlog event, a plain `fmt.Printf` / `fmt.Println` is appropriate for the human running the command. See the `migrate up` example above — the canonical log event goes to Datadog via canonlog; the `Migrations applied successfully. Current version: 5` line is for the operator watching the terminal.
 
-2. **Interactive CLI feedback**: after the structured canonlog event, a plain `fmt.Printf` / `fmt.Println` is appropriate for the human running the command. See the `migrate up` example above — the canonical log event goes to Datadog via canonlog; the `Migrations applied successfully. Current version: 5` line is for the operator watching the terminal.
-
-These two are not substitutes for each other. Don't `fmt.Println` instead of a structured log event — do both when the user-facing output matters.
+Don't `fmt.Println` instead of a structured log event — do both when the user-facing output matters.
 
 ## Passing Config Into the Handler / Service Layer
 
@@ -303,63 +307,3 @@ handler := api.NewHandler(mockSvc, nil, cfg)
 ```
 
 Don't read env vars in tests. If the code under test really cares about env-driven behavior, route it through `config.Config` first.
-
-## Unit-Testing the Loader
-
-The loaders have enough conditional logic (defaults, validation, cross-field constraints) that they deserve their own unit tests. Test the happy path, each required-field failure, each out-of-bounds failure, and the cross-field constraint:
-
-```go
-// internal/config/config_test.go
-package config
-
-import (
-    "testing"
-
-    "github.com/spf13/viper"
-    "github.com/stretchr/testify/assert"
-    "github.com/stretchr/testify/require"
-)
-
-func TestLoad_RequiresDatabaseURL(t *testing.T) {
-    t.Cleanup(viper.Reset)
-    viper.Reset()
-
-    _, err := Load()
-    require.Error(t, err)
-    assert.Contains(t, err.Error(), "DATABASE_URL")
-}
-
-func TestLoad_AppliesDefaults(t *testing.T) {
-    t.Cleanup(viper.Reset)
-    viper.Reset()
-    viper.Set("DATABASE_URL", "postgres://localhost/test")
-    viper.Set("HTTP_READ_TIMEOUT_SECONDS", 15)
-    viper.Set("HTTP_WRITE_TIMEOUT_SECONDS", 15)
-    viper.Set("HTTP_IDLE_TIMEOUT_SECONDS", 60)
-    viper.Set("HTTP_REQUEST_TIMEOUT_SECONDS", 30)
-
-    cfg, err := Load()
-    require.NoError(t, err)
-    assert.Equal(t, 8080, cfg.HTTPPort)
-    assert.Equal(t, "info", cfg.LogLevel)
-    assert.Equal(t, "text", cfg.LogFormat)
-}
-
-func TestLoad_RejectsMinConnsGreaterThanMaxConns(t *testing.T) {
-    t.Cleanup(viper.Reset)
-    viper.Reset()
-    viper.Set("DATABASE_URL", "postgres://localhost/test")
-    viper.Set("HTTP_READ_TIMEOUT_SECONDS", 15)
-    viper.Set("HTTP_WRITE_TIMEOUT_SECONDS", 15)
-    viper.Set("HTTP_IDLE_TIMEOUT_SECONDS", 60)
-    viper.Set("HTTP_REQUEST_TIMEOUT_SECONDS", 30)
-    viper.Set("DB_MAX_CONNS", 5)
-    viper.Set("DB_MIN_CONNS", 10)
-
-    _, err := Load()
-    require.Error(t, err)
-    assert.Contains(t, err.Error(), "DB_MIN_CONNS")
-}
-```
-
-`viper.Reset()` in `t.Cleanup` keeps tests independent — viper is package-global state, so leaking between tests is easy to do accidentally.
