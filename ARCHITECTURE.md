@@ -181,7 +181,7 @@ Two layers with distinct responsibilities:
 
 **API layer — structural validation.** Struct tags via `validator.v10` (registered through `chikit.Binder()` / `chikit.JSON()`). Catches required fields, length limits, format (email, URL, enum values), custom tags. Run before any service call. Failures map to `chikit.ErrBadRequest` or a structured `chikit.NewValidationError([]chikit.FieldError{...})`.
 
-**Service layer — business validation.** Anything that needs database state or cross-field context (duplicate names, referenced resources exist, transitions allowed). Failures return a domain error from `internal/errors` (typically a sentinel like `errors.ErrDuplicateToken` or a `*errors.ValidationError`), which the API layer translates via `handleServiceError`. See [API.md](API.md#error-mapping) for the full translation table.
+**Service layer — business validation.** Anything that needs database state or cross-field context (duplicate names, referenced resources exist, transitions allowed). Failures return a domain error from `internal/errors` (typically a sentinel like `errors.ErrDuplicateToken` or a `*errors.ValidationError`), which the API layer translates via `handleServiceError`. See [ERRORS.md](ERRORS.md) for the full translation chain.
 
 Don't duplicate. Structural validation only in the API layer, business validation only in the service layer.
 

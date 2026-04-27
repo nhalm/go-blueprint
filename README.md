@@ -14,7 +14,8 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 |------|----------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Layer tree, package responsibilities, consumer-owned interfaces, DI pattern, ID strategy |
 | [CONFIG.md](CONFIG.md) | `internal/config` package, per-command loaders (`Load`, `LoadDatabaseOnly`), canonlog setup timing |
-| [API.md](API.md) | `chikit.Handler` middleware stack, handlers, `chikit.SetResponse` / `SetError`, error mapping, response conventions |
+| [API.md](API.md) | `chikit.Handler` middleware stack, handlers, `chikit.SetResponse` / `SetError`, response conventions |
+| [ERRORS.md](ERRORS.md) | Full error chain: DB predicates → repository sentinels → domain errors → HTTP responses, wire format |
 | [DATABASE.md](DATABASE.md) | Schema principles, pgxkit v2 Executor, skimatik config and `.sql` annotations, transactions via context, golang-migrate |
 | [TESTING.md](TESTING.md) | Layer strategy, gomock + testify, `pgxkit.RequireDB`, mounting chikit middleware in handler tests, Makefile targets |
 | [DEVOPS.md](DEVOPS.md) | Docker Compose, Makefile, GitHub Actions CI, `.env` vars, golangci-lint config |

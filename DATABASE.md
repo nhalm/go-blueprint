@@ -308,43 +308,7 @@ Because both `products.Create` and `audit.Create` read the transaction out of `c
 
 ## Error Translation
 
-The generated code exposes predicate helpers (`generated.IsNotFound`, `generated.IsAlreadyExists`, etc.). Translate them to repository-level sentinels, then let the service/API layers map those to domain errors.
-
-```go
-// internal/repository/errors.go
-package repository
-
-import (
-    "errors"
-
-    "github.com/yourorg/myapp/internal/repository/generated"
-)
-
-var (
-    ErrNotFound      = errors.New("not found")
-    ErrAlreadyExists = errors.New("already exists")
-)
-
-func translateError(err error) error {
-    if generated.IsNotFound(err)      { return ErrNotFound }
-    if generated.IsAlreadyExists(err) { return ErrAlreadyExists }
-    return err
-}
-```
-
-The service layer then maps `repository.ErrNotFound` → `errors.ErrProductNotFound` (a domain sentinel from `internal/errors`) so the API layer's `handleServiceError` can translate it to the correct HTTP response without importing anything DB-specific. See [API.md](API.md#error-mapping).
-
-skimatik's full predicate set:
-
-| Helper | Meaning | Typical mapping |
-|--------|---------|-----------------|
-| `IsNotFound`           | No row matched     | `ErrNotFound` |
-| `IsAlreadyExists`      | Unique-constraint violation | `ErrAlreadyExists` / `ErrDuplicate*` |
-| `IsInvalidReference`   | Foreign-key violation | domain-specific conflict |
-| `IsValidationError`    | CHECK constraint / NOT NULL violation | `ValidationError` with field detail |
-| `IsConnectionError`    | Connection dropped / refused | `ErrServiceUnavailable` |
-| `IsTimeout`            | Statement timeout | `ErrRequestTimeout` |
-| `IsDatabaseError`      | Catch-all database error | `ErrDatabaseFailed` |
+See [ERRORS.md](ERRORS.md#repository-layer--db--repository-sentinels) for the full `translateError` implementation, skimatik's predicate set, and how errors flow from the repository through the service layer to the HTTP response.
 
 ## Migrations — golang-migrate
 

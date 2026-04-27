@@ -2,7 +2,7 @@
 
 How the `internal/config` package is structured, how each command loads the config it actually needs, and how canonlog gets initialized.
 
-Error handling patterns (apperrors sentinels, `chikit.SetError`, when to `canonlog.ErrorAdd`) live in [API.md's Error Mapping section](API.md#error-mapping).
+Error handling patterns (apperrors sentinels, `chikit.SetError`, when to `canonlog.ErrorAdd`) live in [ERRORS.md](ERRORS.md).
 
 ## Philosophy
 
