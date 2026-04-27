@@ -23,11 +23,9 @@ go get github.com/golang-migrate/migrate/v4
 
 1. **`UUID PRIMARY KEY`** (no `DEFAULT`). UUIDv7 values are generated app-side by skimatik; the DB column is the plain `UUID` type. See [ARCHITECTURE.md](ARCHITECTURE.md#id-strategy--uuidv7--shortuuid).
 2. **Always** `created_at` + `updated_at` (`TIMESTAMPTZ NOT NULL DEFAULT NOW()`).
-3. **Soft deletes** via `deleted_at TIMESTAMPTZ` (nullable). Filter `WHERE deleted_at IS NULL` in every read query. Hard deletes are a separate cleanup job.
+3. **Soft deletes** via `deleted_at TIMESTAMPTZ` (nullable). Filter `WHERE deleted_at IS NULL` in every read query.
 4. **Provider-agnostic column names**: `external_payment_id`, `checkout_session_id` — not `stripe_id`, `adyen_ref`. Keeps integrations swappable.
-5. **Full indexes, not partial**: index on `(column)` without a `WHERE deleted_at IS NULL` predicate. Partial indexes only reduce index size when a large fraction of rows are deleted. For the low-churn entities typical of this stack (accounts, products, users), deletion rates are low enough that a partial index stays nearly the same size as a full one — you get predicate coupling with no meaningful payoff. The coupling is the real cost: PostgreSQL can only use a partial index when the query predicate matches, so a query that accidentally omits `AND deleted_at IS NULL` silently falls back to a seq scan. Full indexes avoid that failure mode entirely.
-
-   The one exception is a **partial unique index**, which serves a semantic purpose rather than a performance one: `UNIQUE (account_id, name) WHERE deleted_at IS NULL` allows a name to be reused after soft-delete. Use it when re-use after deletion is the intended behavior for that column.
+5. **Partial indexes: evaluate per table.** Use `WHERE deleted_at IS NULL` on indexes for high-churn tables (payments, sessions, orders) where deleted rows accumulate and the size reduction is meaningful. Skip it for low-churn tables (cards, cardholders) where soft-deletes are rare — the partial predicate adds coupling with no payoff. The `WHERE deleted_at IS NULL` filter on queries is mandatory regardless; this is purely a performance decision. For unique indexes, prefer the partial form so that a soft-deleted value can be reused.
 
 ```sql
 CREATE TABLE products (
