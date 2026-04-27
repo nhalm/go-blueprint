@@ -109,7 +109,7 @@ type Handler struct {
 }
 ```
 
-Running `go generate ./...` produces the `mock_*_test.go` files. See [TESTING.md](TESTING.md) for how they're used.
+Running `go generate ./...` produces the `*_interface_mock.go` files. See [TESTING.md](TESTING.md) for how they're used.
 
 ## Explicit Dependency Injection
 
