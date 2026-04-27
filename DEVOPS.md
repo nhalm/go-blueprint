@@ -4,6 +4,16 @@ Docker, Makefile, CI, environment variables, and the development workflow.
 
 The [`templates/`](templates/) directory contains copy-ready versions of every config file. Grab them into a new project and replace `myapp` with your binary/module name.
 
+## Git Hooks — Lefthook
+
+See [`templates/lefthook.yml`](templates/lefthook.yml). Pre-commit runs `fmt`, `lint`, and `test` in parallel. Pre-push runs `test-integration`.
+
+`lefthook` is installed by `make install-tools`. After copying the template, activate the hooks once:
+
+```bash
+lefthook install
+```
+
 ## Docker Compose — Dev Database
 
 See [`templates/docker-compose.yml`](templates/docker-compose.yml).
@@ -67,6 +77,7 @@ cp path/to/go-blueprint/templates/skimatik.yaml .
 cp path/to/go-blueprint/templates/.golangci.yml .
 cp path/to/go-blueprint/templates/.env.example .
 cp path/to/go-blueprint/templates/.gitignore .
+cp path/to/go-blueprint/templates/lefthook.yml .
 mkdir -p .github/workflows && cp path/to/go-blueprint/templates/.github/workflows/ci.yml .github/workflows/
 
 # Replace "myapp" in Makefile with your actual module/binary name
@@ -76,6 +87,7 @@ cp .env.example .env
 # Fill in DATABASE_URL and any other secrets
 
 make setup   # install-tools + generate (requires dev DB)
+lefthook install
 ```
 
 ### Daily Loop
