@@ -49,6 +49,8 @@ config  ←  cmd, service (when cfg is injected)
 
 Lower layers never import higher layers. `models` and `errors` are the foundation — they import nothing from `internal/*`.
 
+**Pass values across layer boundaries, not pointers.** Functions in interfaces and domain methods accept and return `models.X` values, never `*models.X`. Pointers stay within a layer (e.g., pointer receivers on structs, `*generated.X` inside the repository package). This eliminates nil-pointer error paths at boundaries and makes data flow explicit.
+
 | Package | Imports from | Responsibility |
 |---------|--------------|----------------|
 | `models` | `google/uuid`, stdlib | Domain entities, request/response input types |
@@ -78,8 +80,8 @@ The `//go:generate mockgen` directive lives at the top of the interface file. Bo
 package service
 
 type ProductRepository interface {
-    Create(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-    GetByID(ctx context.Context, params models.GetProductParams) (*models.Product, error)
+    Create(ctx context.Context, req models.CreateProductRequest) (models.Product, error)
+    GetByID(ctx context.Context, params models.GetProductParams) (models.Product, error)
     // ...
 }
 ```
@@ -91,7 +93,7 @@ type ProductRepository interface {
 package api
 
 type ProductServiceInterface interface {
-    CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
+    CreateProduct(ctx context.Context, req models.CreateProductRequest) (models.Product, error)
     // ...
 }
 ```

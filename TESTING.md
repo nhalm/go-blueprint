@@ -41,8 +41,8 @@ Each layer defines the interfaces it consumes (consumer-owned interfaces — see
 package service
 
 type ProductRepository interface {
-    Create(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-    GetByID(ctx context.Context, id string) (*models.Product, error)
+    Create(ctx context.Context, req models.CreateProductRequest) (models.Product, error)
+    GetByID(ctx context.Context, id string) (models.Product, error)
     // ...
 }
 ```
@@ -104,26 +104,26 @@ Table-driven, one case per row, each case brings its own `mockSetup`:
 func TestProductService_CreateProduct(t *testing.T) {
     tests := []struct {
         name      string
-        req       *models.CreateProductRequest
+        req       models.CreateProductRequest
         mockSetup func(*MockProductRepository)
         wantErr   bool
     }{
         {
             name: "successful creation",
-            req:  &models.CreateProductRequest{Name: "test", Active: true},
+            req:  models.CreateProductRequest{Name: "test", Active: true},
             mockSetup: func(m *MockProductRepository) {
                 m.EXPECT().
                     Create(gomock.Any(), gomock.Any()).
-                    Return(&models.Product{ID: "prod_abc", Name: "test"}, nil)
+                    Return(models.Product{Name: "test"}, nil)
             },
         },
         {
             name: "repository error propagates",
-            req:  &models.CreateProductRequest{Name: "test", Active: true},
+            req:  models.CreateProductRequest{Name: "test", Active: true},
             mockSetup: func(m *MockProductRepository) {
                 m.EXPECT().
                     Create(gomock.Any(), gomock.Any()).
-                    Return(nil, errors.New("db down"))
+                    Return(models.Product{}, errors.New("db down"))
             },
             wantErr: true,
         },
@@ -140,11 +140,9 @@ func TestProductService_CreateProduct(t *testing.T) {
 
             if tt.wantErr {
                 require.Error(t, err)
-                assert.Nil(t, got)
                 return
             }
             require.NoError(t, err)
-            require.NotNil(t, got)
         })
     }
 }

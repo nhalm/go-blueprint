@@ -142,7 +142,7 @@ type PaginationResult[T any] struct {
 
 ## Repository Pattern
 
-Hand-written repos **embed** the generated `Repository` (CRUD) and `Queries` (custom SQL) structs. Domain methods return `*models.X`, not `*generated.X`.
+Hand-written repos **embed** the generated `Repository` (CRUD) and `Queries` (custom SQL) structs. Domain methods return `models.X` values — never pointers, never `*generated.X`.
 
 ```go
 // internal/repository/product.go
@@ -171,16 +171,16 @@ func NewProductRepository(db *pgxkit.DB) *ProductRepository {
     }
 }
 
-func (r *ProductRepository) GetByAccountAndID(ctx context.Context, accountID, id uuid.UUID) (*models.Product, error) {
+func (r *ProductRepository) GetByAccountAndID(ctx context.Context, accountID, id uuid.UUID) (models.Product, error) {
     row, err := r.GetProductByAccountAndID(ctx, executorFromContext(ctx, r.db), accountID, id)
     if err != nil {
-        return nil, translateError(err)
+        return models.Product{}, translateError(err)
     }
     return toProductModel(row), nil
 }
 
-func toProductModel(p *generated.Products) *models.Product {
-    return &models.Product{
+func toProductModel(p *generated.Products) models.Product {
+    return models.Product{
         ID:          p.Id,
         AccountID:   p.AccountId,
         Name:        p.Name,
@@ -285,17 +285,17 @@ func (m *TxManager) BeginTx(ctx context.Context) (context.Context, func() error,
 Service usage:
 
 ```go
-func (s *ProductService) CreateWithAudit(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error) {
+func (s *ProductService) CreateWithAudit(ctx context.Context, req models.CreateProductRequest) (models.Product, error) {
     txCtx, commit, rollback, err := s.tx.BeginTx(ctx)
     if err != nil {
-        return nil, err
+        return models.Product{}, err
     }
     defer rollback(ctx)
 
     product, err := s.products.Create(txCtx, req)
-    if err != nil { return nil, err }
+    if err != nil { return models.Product{}, err }
 
-    if err := s.audit.Create(txCtx, &models.AuditLog{ /* ... */ }); err != nil {
+    if err := s.audit.Create(txCtx, models.AuditLog{ /* ... */ }); err != nil {
         return nil, err
     }
 

@@ -102,11 +102,11 @@ import (
 )
 
 type ProductServiceInterface interface {
-    CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-    GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error)
-    UpdateProduct(ctx context.Context, req *models.UpdateProductRequest) (*models.Product, error)
+    CreateProduct(ctx context.Context, req models.CreateProductRequest) (models.Product, error)
+    GetProduct(ctx context.Context, params models.GetProductParams) (models.Product, error)
+    UpdateProduct(ctx context.Context, req models.UpdateProductRequest) (models.Product, error)
     DeleteProduct(ctx context.Context, params models.DeleteProductParams) error
-    ListProducts(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error)
+    ListProducts(ctx context.Context, filter models.ListProductsFilter) (models.ListProductsResult, error)
 }
 ```
 
@@ -248,7 +248,7 @@ type ProductResponse struct {
     // ...
 }
 
-func ProductResponseFromModel(p *models.Product) ProductResponse {
+func ProductResponseFromModel(p models.Product) ProductResponse {
     id, _       := shortuuid.ShortenUUID(p.ID)
     accountID, _ := shortuuid.ShortenUUID(p.AccountID)
     return ProductResponse{
@@ -259,7 +259,7 @@ func ProductResponseFromModel(p *models.Product) ProductResponse {
 }
 ```
 
-Response-type `json` fields carrying IDs are always `string` (the encoded form). Domain `*models.X` types use `uuid.UUID` for ID fields. The boundary between the two is the response converter / handler.
+Response-type `json` fields carrying IDs are always `string` (the encoded form). Domain `models.X` types use `uuid.UUID` for ID fields. The boundary between the two is the response converter / handler.
 
 ## Request / Response Types
 
@@ -274,8 +274,8 @@ type CreateProductRequest struct {
     Active      bool    `json:"active"`
 }
 
-func (r CreateProductRequest) ToServiceModel(accountID string) *models.CreateProductRequest {
-    return &models.CreateProductRequest{
+func (r CreateProductRequest) ToServiceModel(accountID string) models.CreateProductRequest {
+    return models.CreateProductRequest{
         AccountID:   accountID,
         Name:        r.Name,
         Description: r.Description,
@@ -292,7 +292,7 @@ type ProductResponse struct {
     UpdatedAt   string  `json:"updated_at"`
 }
 
-func ProductResponseFromModel(p *models.Product) ProductResponse {
+func ProductResponseFromModel(p models.Product) ProductResponse {
     id, _ := shortuuid.ShortenUUID(p.ID)
     return ProductResponse{
         ID:          id,
