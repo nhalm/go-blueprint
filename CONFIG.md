@@ -6,12 +6,14 @@ Error handling patterns (apperrors sentinels, `chikit.SetError`, when to `canonl
 
 ## Philosophy
 
-- **One typed `Config` struct** owned by `internal/config`.
-- **Per-command loaders** return the subset each command can run with. A `serve` with a missing `HTTP_PORT` should fail; a `migrate up` with a missing `HTTP_PORT` should not.
-- **Validation lives here, not in handlers or services.** Field-level validation (required, bounds, format), default values, and cross-field constraints all happen inside `Load*` functions and return errors — no panics, no silent fallbacks.
-- **Canonlog is set up per-command**, inside each `RunE`, right after `Load*()` succeeds. That lets each command honor `LOG_LEVEL` / `LOG_FORMAT` *before* doing any logging.
+- **One flat `Config` struct** owned by `internal/config`. Flat because env vars are flat.
+- **Composable group loaders** — `LoadDatabase()`, `LoadLogging()`, `LoadHTTP()`, `LoadRedis()` — each validates its own fields. Each `RunE` calls the groups it needs and reads any command-specific fields inline. No duplication, no loading config a command doesn't use.
+- **Validation lives here, not in handlers or services.** Field-level validation (required, bounds, format), default values, and cross-field constraints all happen inside loader functions and return errors — no panics, no silent fallbacks.
+- **Canonlog is set up per-command**, inside each `RunE`, right after `LoadLogging()` succeeds. That lets each command honor `LOG_LEVEL` / `LOG_FORMAT` *before* doing any logging.
 
 ## Package Shape
+
+One flat struct, populated by composable group loaders:
 
 ```go
 // internal/config/config.go
@@ -51,94 +53,77 @@ type Config struct {
 }
 ```
 
-## Two Loaders
+## Group Loaders
 
-**`Load()` — full config for `serve`.** Validates everything. Returns an error on any missing required field.
-
-**`LoadDatabaseOnly()` — minimal config for `migrate`, cleanup jobs, CLI tools.** Only reads `DATABASE_URL`, `LOG_LEVEL`, `LOG_FORMAT`. A migration doesn't need an HTTP port or rate limit config, and failing on those would block running migrations on a host that only has DB creds.
+Each loader validates and populates its slice of `Config`. `RunE` calls the groups it needs, then reads any command-specific fields inline.
 
 ```go
-func Load() (Config, error) {
-    if err := readConfig(); err != nil {
-        return Config{}, err
-    }
-
-    databaseURL := viper.GetString("DATABASE_URL")
-    if databaseURL == "" {
-        return Config{}, fmt.Errorf("DATABASE_URL is required")
-    }
-
-    httpPort := viper.GetInt("HTTP_PORT")
-    if httpPort == 0 { httpPort = 8080 }
-    if httpPort < 1 || httpPort > 65535 {
-        return Config{}, fmt.Errorf("HTTP_PORT must be 1-65535 (got %d)", httpPort)
-    }
-
+func LoadLogging(cfg *Config) error {
     logLevel := viper.GetString("LOG_LEVEL")
     if logLevel == "" { logLevel = "info" }
     if !isValidLogLevel(logLevel) {
-        return Config{}, fmt.Errorf("LOG_LEVEL must be one of: debug, info, warn, error (got %q)", logLevel)
+        return fmt.Errorf("LOG_LEVEL must be one of: debug, info, warn, error (got %q)", logLevel)
     }
 
     logFormat := viper.GetString("LOG_FORMAT")
     if logFormat == "" { logFormat = "text" }
     if !isValidLogFormat(logFormat) {
-        return Config{}, fmt.Errorf("LOG_FORMAT must be one of: text, json (got %q)", logFormat)
+        return fmt.Errorf("LOG_FORMAT must be one of: text, json (got %q)", logFormat)
     }
 
-    maxBody := viper.GetInt("MAX_REQUEST_BODY_BYTES")
-    if maxBody == 0 { maxBody = 1048576 }
-    if maxBody < 1024 || maxBody > 10485760 {
-        return Config{}, fmt.Errorf("MAX_REQUEST_BODY_BYTES must be 1KB-10MB (got %d)", maxBody)
+    cfg.LogLevel  = logLevel
+    cfg.LogFormat = logFormat
+    return nil
+}
+
+func LoadDatabase(cfg *Config) error {
+    databaseURL := viper.GetString("DATABASE_URL")
+    if databaseURL == "" {
+        return fmt.Errorf("DATABASE_URL is required")
     }
 
     dbMaxConns := viper.GetInt32("DB_MAX_CONNS"); if dbMaxConns == 0 { dbMaxConns = 25 }
     dbMinConns := viper.GetInt32("DB_MIN_CONNS"); if dbMinConns == 0 { dbMinConns = 5 }
     if dbMinConns > dbMaxConns {
-        return Config{}, fmt.Errorf("DB_MIN_CONNS (%d) cannot exceed DB_MAX_CONNS (%d)", dbMinConns, dbMaxConns)
+        return fmt.Errorf("DB_MIN_CONNS (%d) cannot exceed DB_MAX_CONNS (%d)", dbMinConns, dbMaxConns)
     }
 
-    // ... rest of the fields, same pattern: default, validate, include in returned struct ...
-
-    return Config{
-        DatabaseURL:         databaseURL,
-        HTTPPort:            httpPort,
-        LogLevel:            logLevel,
-        LogFormat:           logFormat,
-        MaxRequestBodyBytes: maxBody,
-        DBMaxConns:          dbMaxConns,
-        DBMinConns:          dbMinConns,
-        // ...
-    }, nil
+    cfg.DatabaseURL       = databaseURL
+    cfg.DBMaxConns        = dbMaxConns
+    cfg.DBMinConns        = dbMinConns
+    // ... DBMaxConnLifetime, DBMaxConnIdleTime ...
+    return nil
 }
 
-func LoadDatabaseOnly() (Config, error) {
-    if err := readConfig(); err != nil {
-        return Config{}, err
+func LoadHTTP(cfg *Config) error {
+    httpPort := viper.GetInt("HTTP_PORT")
+    if httpPort == 0 { httpPort = 8080 }
+    if httpPort < 1 || httpPort > 65535 {
+        return fmt.Errorf("HTTP_PORT must be 1-65535 (got %d)", httpPort)
     }
 
-    databaseURL := viper.GetString("DATABASE_URL")
-    if databaseURL == "" {
-        return Config{}, fmt.Errorf("DATABASE_URL is required")
+    maxBody := viper.GetInt("MAX_REQUEST_BODY_BYTES")
+    if maxBody == 0 { maxBody = 1048576 }
+    if maxBody < 1024 || maxBody > 10485760 {
+        return fmt.Errorf("MAX_REQUEST_BODY_BYTES must be 1KB-10MB (got %d)", maxBody)
     }
 
-    logLevel := viper.GetString("LOG_LEVEL")
-    if logLevel == "" { logLevel = "info" }
-    if !isValidLogLevel(logLevel) {
-        return Config{}, fmt.Errorf("LOG_LEVEL must be one of: debug, info, warn, error (got %q)", logLevel)
-    }
+    cfg.HTTPPort            = httpPort
+    cfg.MaxRequestBodyBytes = maxBody
+    // ... timeouts, rate limit ...
+    return nil
+}
 
-    logFormat := viper.GetString("LOG_FORMAT")
-    if logFormat == "" { logFormat = "text" }
-    if !isValidLogFormat(logFormat) {
-        return Config{}, fmt.Errorf("LOG_FORMAT must be one of: text, json (got %q)", logFormat)
+func LoadRedis(cfg *Config) error {
+    redisURL := viper.GetString("REDIS_URL")
+    if redisURL == "" {
+        return fmt.Errorf("REDIS_URL is required")
     }
-
-    return Config{
-        DatabaseURL: databaseURL,
-        LogLevel:    logLevel,
-        LogFormat:   logFormat,
-    }, nil
+    cfg.RedisURL      = redisURL
+    cfg.RedisPassword = viper.GetString("REDIS_PASSWORD")
+    cfg.RedisDB       = viper.GetInt("REDIS_DB")
+    cfg.RedisPrefix   = viper.GetString("REDIS_PREFIX")
+    return nil
 }
 
 var validLogLevels  = []string{"debug", "info", "warn", "error"}
@@ -147,7 +132,7 @@ var validLogFormats = []string{"text", "json"}
 func isValidLogLevel(l string)  bool { return slices.Contains(validLogLevels, l) }
 func isValidLogFormat(f string) bool { return slices.Contains(validLogFormats, f) }
 
-func readConfig() error {
+func Init() error {
     viper.SetConfigFile(".env")
     viper.SetConfigType("env")
     viper.AutomaticEnv()
@@ -178,7 +163,7 @@ func loadHexKey(envVar string) ([]byte, error) {
 
 ## Command Usage
 
-Each command's `RunE` calls the appropriate loader first, sets up canonlog, then does its work. Nothing should log before `canonlog.SetupGlobalLogger`.
+Each `RunE` calls `config.Init()` first, then the group loaders it needs, then sets up canonlog. Nothing should log before `canonlog.SetupGlobalLogger`.
 
 ### `serve`
 
@@ -187,11 +172,26 @@ Each command's `RunE` calls the appropriate loader first, sets up canonlog, then
 func runServe(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
 
-    cfg, err := config.Load()
-    if err != nil {
-        return fmt.Errorf("failed to load config: %w", err)
+    if err := config.Init(); err != nil {
+        return err
+    }
+
+    var cfg config.Config
+    if err := config.LoadLogging(&cfg); err != nil {
+        return err
     }
     canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
+
+    if err := config.LoadDatabase(&cfg); err != nil {
+        return err
+    }
+    if err := config.LoadHTTP(&cfg); err != nil {
+        return err
+    }
+    if err := config.LoadRedis(&cfg); err != nil {
+        return err
+    }
+    // ... load any serve-specific fields inline ...
 
     db := pgxkit.NewDB()
     if err := db.Connect(ctx, cfg.DatabaseURL,
@@ -216,11 +216,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 func runMigrateUp(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
 
-    cfg, err := config.LoadDatabaseOnly()
-    if err != nil {
-        return fmt.Errorf("failed to load config: %w", err)
+    if err := config.Init(); err != nil {
+        return err
+    }
+
+    var cfg config.Config
+    if err := config.LoadLogging(&cfg); err != nil {
+        return err
     }
     canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
+
+    if err := config.LoadDatabase(&cfg); err != nil {
+        return err
+    }
 
     m, err := migrate.New("file://./migrations", cfg.DatabaseURL)
     if err != nil {
@@ -294,7 +302,7 @@ r.Use(chikit.MaxBodySize(int64(h.config.MaxRequestBodyBytes)))
 
 ## Test-Time Config
 
-Tests assemble a minimal `config.Config` literal, skipping `Load()` entirely:
+Tests assemble a minimal `config.Config` literal directly — no `Init()`, no group loaders, no env vars:
 
 ```go
 cfg := config.Config{
