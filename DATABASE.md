@@ -1,21 +1,26 @@
 # Database Layer
 
-Schema design, repositories, queries, and migrations — built on **pgxkit v2**, **skimatik v0.7+**, and **golang-migrate**.
+Schema design, repositories, queries, and migrations — built on **[pgxkit v2](https://github.com/nhalm/pgxkit)**, **[skimatik v0.7+](https://github.com/nhalm/skimatik)**, and **golang-migrate**.
 
 ## Tool Prerequisites
 
+**[skimatik](https://github.com/nhalm/skimatik)** — generates type-safe repositories from your PostgreSQL schema:
 ```bash
-# skimatik — generates type-safe repositories from your PostgreSQL schema
 go install github.com/nhalm/skimatik/cmd/skimatik@latest
+```
 
-# pgxkit v2 — connection pooling + Executor interface the generated code uses
+**[pgxkit v2](https://github.com/nhalm/pgxkit)** — connection pooling + Executor interface the generated code uses:
+```bash
 go get github.com/nhalm/pgxkit/v2
+```
 
-# google/uuid — UUID type used by the generated code; skimatik's generator
-# package embeds a UUIDv7() helper backed by uuid.NewV7()
+**google/uuid** — UUID type used by the generated code; skimatik's generator package embeds a `UUIDv7()` helper backed by `uuid.NewV7()`:
+```bash
 go get github.com/google/uuid
+```
 
-# golang-migrate — migration driver (used inside cmd/<app>/migrate.go; no binary needed)
+**golang-migrate** — migration driver (used inside `cmd/<app>/migrate.go`; no binary needed):
+```bash
 go get github.com/golang-migrate/migrate/v4
 ```
 
