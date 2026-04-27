@@ -14,6 +14,8 @@ go install github.com/nhalm/skimatik/cmd/skimatik@latest
 go get github.com/nhalm/pgxkit/v2
 ```
 
+Pool sizing: `DB_MAX_CONNS × replica_count` must stay below Postgres `max_connections`. Leave headroom for admin connections and other tools.
+
 **google/uuid** — UUID type used by the generated code; skimatik's generator package embeds a `UUIDv7()` helper backed by `uuid.NewV7()`:
 ```bash
 go get github.com/google/uuid
@@ -81,6 +83,8 @@ queries:
 
 `default_functions: "all"` gives you `Create`/`Get`/`Update`/`Delete`/`List`/`Paginate` per table. Override per table with `functions: [get, list]` when you don't want writes generated (read-only tables, for example).
 
+The generated `List` and `Paginate` functions don't know about `deleted_at` — they return all rows. Always use custom queries (`:many` or `:paginated`) for any list path that needs the soft-delete filter.
+
 Generation runs against a live database — the dev Postgres must be up with migrations applied:
 ```bash
 make db-up
@@ -125,6 +129,8 @@ WHERE account_id = $1 AND id = $2 AND deleted_at IS NULL;
 | `:paginated` | `func(ctx, exec, params..., pagination PaginationParams) (*PaginationResult[Row], error)` | Cursor pagination in both directions. Requires an `ORDER BY` clause. |
 | `:exec`      | `func(ctx, exec, params...) error` | No result set — inserts, updates, deletes. |
 
+For nullable fields, custom pgx types, or struct composition, skimatik supports `-- param:` and `-- result:` override annotations. See the [skimatik docs](https://github.com/nhalm/skimatik/tree/main/docs) for the full syntax.
+
 `:paginated` requires an explicit `ORDER BY`. Ascending order uses `>` forward / `<` backward; descending flips that. The generated `PaginationResult[T]`:
 
 ```go
@@ -161,16 +167,16 @@ import (
 )
 
 type ProductRepository struct {
+    db *pgxkit.DB
     *generated.ProductsRepository
     *generated.ProductsQueries
-    db *pgxkit.DB
 }
 
 func NewProductRepository(db *pgxkit.DB) *ProductRepository {
     return &ProductRepository{
+        db:                 db,
         ProductsRepository: generated.NewProductsRepository(nil), // nil = default UUIDv7
         ProductsQueries:    generated.NewProductsQueries(),
-        db:                 db,
     }
 }
 
@@ -299,15 +305,17 @@ func (s *ProductService) CreateWithAudit(ctx context.Context, req models.CreateP
     if err != nil { return models.Product{}, err }
 
     if err := s.audit.Create(txCtx, models.AuditLog{ /* ... */ }); err != nil {
-        return nil, err
+        return models.Product{}, err
     }
 
-    if err := commit(); err != nil { return nil, err }
+    if err := commit(); err != nil { return models.Product{}, err }
     return product, nil
 }
 ```
 
-Because both `products.Create` and `audit.Create` read the transaction out of `ctx`, they automatically participate. No transaction argument threading.
+Because both `products.Create` and `audit.Create` read the transaction out of `ctx`, they automatically participate. No transaction argument threading. `defer rollback(ctx)` is safe to leave unconditionally — pgxkit's `Rollback` is a no-op on an already-committed transaction.
+
+`TxManager` lives in the `repository` package and is the one case where `service` imports `repository` directly. This is intentional — `TxManager` is an infrastructure primitive, not a domain type.
 
 ## Error Translation
 
@@ -344,7 +352,7 @@ func runMigrateUp(cmd *cobra.Command, args []string) error {
     }
     canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
 
-    m, err := migrate.New("file://./migrations", cfg.DatabaseURL)
+    m, err := migrate.New("file://internal/database/migrations", cfg.DatabaseURL)
     if err != nil {
         return fmt.Errorf("failed to create migrator: %w", err)
     }
@@ -373,12 +381,16 @@ func runMigrateUp(cmd *cobra.Command, args []string) error {
 
 Note the dual output: structured `canonlog` event for observability + plain `fmt.Printf` for the human running the command. Both are correct — see the [CONFIG.md logging note](CONFIG.md#logging-during-cli-commands).
 
+The migration source path is relative to the working directory at runtime. In a container the binary typically isn't at the project root — embed migration files with `//go:embed` or pass the path via config rather than hardcoding a relative path.
+
+`migrate down` rolls back exactly one version. Treat down migrations as a last resort in production — column drops and renames are irreversible. Write down migrations for dev convenience, not production rollback.
+
 ## Schema.sql vs Migrations
 
 - **`internal/database/schema.sql`** — current schema as one file. Used by skimatik introspection *and* for dev reset (drop + recreate + reload in one shot).
 - **`internal/database/migrations/*.sql`** — incremental changes. What runs in production.
 
-The two must agree. When you add a migration, also update `schema.sql` to the post-migration state so skimatik generates against the right schema.
+The two must agree. When you add a migration, also update `schema.sql` to the post-migration state so skimatik generates against the right schema. Validate in CI by running `make migrate-up` against a fresh DB — drift surfaces as a failing migration or a skimatik generation mismatch.
 
 ## Dev Reset
 
