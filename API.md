@@ -422,7 +422,11 @@ type ListResponse[T any] struct {
 
 ## Swagger
 
-Annotate handlers with standard swaggo tags. Generate with `make swagger` (`swag init -g cmd/<app>/main.go -o docs`).
+Annotate handlers with standard swaggo tags. Generate with:
+
+```bash
+make swagger
+```
 
 ```go
 // CreateProduct godoc
