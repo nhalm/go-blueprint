@@ -59,6 +59,16 @@ Each loader validates and populates its slice of `Config`. `RunE` calls the grou
 
 ```go
 func LoadLogging(cfg *Config) error {
+    viper.SetConfigFile(".env")
+    viper.SetConfigType("env")
+    viper.AutomaticEnv()
+    if err := viper.ReadInConfig(); err != nil {
+        var notFound viper.ConfigFileNotFoundError
+        if !errors.As(err, &notFound) {
+            return fmt.Errorf("failed to read config file: %w", err)
+        }
+    }
+
     logLevel := viper.GetString("LOG_LEVEL")
     if logLevel == "" { logLevel = "info" }
     if !isValidLogLevel(logLevel) {
@@ -132,18 +142,6 @@ var validLogFormats = []string{"text", "json"}
 func isValidLogLevel(l string)  bool { return slices.Contains(validLogLevels, l) }
 func isValidLogFormat(f string) bool { return slices.Contains(validLogFormats, f) }
 
-func Init() error {
-    viper.SetConfigFile(".env")
-    viper.SetConfigType("env")
-    viper.AutomaticEnv()
-    if err := viper.ReadInConfig(); err != nil {
-        var notFound viper.ConfigFileNotFoundError
-        if !errors.As(err, &notFound) {
-            return fmt.Errorf("failed to read config file: %w", err)
-        }
-    }
-    return nil
-}
 ```
 
 For opaque values like encryption keys, put the decode/length check in a helper:
@@ -163,7 +161,7 @@ func loadHexKey(envVar string) ([]byte, error) {
 
 ## Command Usage
 
-Each `RunE` calls `config.Init()` first, then the group loaders it needs, then sets up canonlog. Nothing should log before `canonlog.SetupGlobalLogger`.
+Each `RunE` calls `config.LoadLogging` first — which also initializes viper — then sets up canonlog, then calls the remaining group loaders it needs. Nothing should log before `canonlog.SetupGlobalLogger`.
 
 ### `serve`
 
@@ -171,10 +169,6 @@ Each `RunE` calls `config.Init()` first, then the group loaders it needs, then s
 // cmd/<app>/serve.go
 func runServe(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
-
-    if err := config.Init(); err != nil {
-        return err
-    }
 
     var cfg config.Config
     if err := config.LoadLogging(&cfg); err != nil {
@@ -215,10 +209,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 // cmd/<app>/migrate.go
 func runMigrateUp(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
-
-    if err := config.Init(); err != nil {
-        return err
-    }
 
     var cfg config.Config
     if err := config.LoadLogging(&cfg); err != nil {
@@ -302,7 +292,7 @@ r.Use(chikit.MaxBodySize(int64(h.config.MaxRequestBodyBytes)))
 
 ## Test-Time Config
 
-Tests assemble a minimal `config.Config` literal directly — no `Init()`, no group loaders, no env vars:
+Tests assemble a minimal `config.Config` literal directly — no group loaders, no env vars:
 
 ```go
 cfg := config.Config{
