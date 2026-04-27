@@ -32,11 +32,12 @@ internal/
   │   ├── validators.go     # Custom validator tags registered with chikit
   │   └── *.go              # Per-resource handlers (aliases.go, products.go, ...)
   ├── errors/               # Domain errors (sentinel vars + ValidationError struct)
-  ├── id/                   # KSUID generation with entity prefixes
   └── testutil/             # Optional: shared fixture factories (NOT a GetTestDB helper)
 
 test/e2e/                   # Optional end-to-end tests with real httptest.Server + DB
 ```
+
+No `internal/id` package — skimatik handles UUIDv7 generation internally when repositories are constructed with `nil` for the ID generator (see [ID Strategy](#id-strategy--uuidv7--shortuuid) below).
 
 ## Dependency Flow
 
@@ -44,19 +45,17 @@ test/e2e/                   # Optional end-to-end tests with real httptest.Serve
 models  ←  repository  ←  service  ←  api  ←  cmd
 errors  ←  every layer
 config  ←  cmd, service (when cfg is injected)
-id      ←  repository (for prefixed KSUIDs)
 ```
 
 Lower layers never import higher layers. `models` and `errors` are the foundation — they import nothing from `internal/*`.
 
 | Package | Imports from | Responsibility |
 |---------|--------------|----------------|
-| `models` | stdlib | Domain entities, request/response input types |
+| `models` | `google/uuid`, stdlib | Domain entities, request/response input types |
 | `errors` | stdlib | Sentinel error values, `ValidationError`/`FieldError` structs |
-| `id` | `github.com/segmentio/ksuid` | `NewAccountID()`, `NewProductID()`, etc. |
 | `repository` | `models`, `errors`, generated, `pgxkit/v2` | SQL queries, transaction boundaries |
 | `service` | `models`, `errors`, consumer-owned repo interfaces | Business logic, cross-repo orchestration |
-| `api` | `models`, `errors`, consumer-owned service interfaces, `chikit` | HTTP transport, request/response mapping |
+| `api` | `models`, `errors`, consumer-owned service interfaces, `chikit`, `shortuuid` | HTTP transport, request/response mapping, wire ID encoding |
 | `config` | `viper` | Typed config, validation, defaults |
 
 ## Consumer-Owned Interfaces
@@ -136,7 +135,7 @@ func runServe(cmd *cobra.Command, args []string) error {
     }
     defer db.Shutdown(ctx)
 
-    productRepo := repository.NewProductRepository(db, id.NewProductID)
+    productRepo := repository.NewProductRepository(db)
     productSvc := service.NewProductService(productRepo, cfg)
     handler := api.NewHandler(productSvc, db, cfg)
 
@@ -184,37 +183,44 @@ Two layers with distinct responsibilities:
 
 Don't duplicate. Structural validation only in the API layer, business validation only in the service layer.
 
-## ID Strategy — KSUID with prefixes
+## ID Strategy — UUIDv7 + shortuuid
 
-Primary keys are `TEXT` columns holding **prefixed KSUIDs**:
+Primary keys are **UUIDv7** generated app-side by skimatik, stored in Postgres `UUID` columns, carried through Go as `uuid.UUID`, and encoded as 22-char base62 **shortuuid** strings on the wire.
 
 ```
-prod_2ArTLVPddDx8vZk7CqEbiYp1   # Product
-acc_2ArTLVPddDx8vZk7CqEbiYp2    # Account
-tok_2ArTLVPddDx8vZk7CqEbiYp3    # Token
+internal:  01903abc-1234-7def-8000-abcdef012345    (uuid.UUID field, UUID column)
+wire:      2s8gNnj9C5Ubkx4T7W5vZk                  (shortuuid-encoded JSON + URL params)
 ```
 
-**Why KSUID over UUID**: time-ordered (good index locality, like UUIDv7), 27 chars vs 36, URL-safe, 128 bits of randomness + timestamp.
+**Why UUIDv7 over KSUID or UUIDv4**: the first 48 bits are a millisecond timestamp, so rows insert in roughly monotonic order — tight B-tree index locality, like KSUID, but as a standards-compliant UUID that every tool understands. No Postgres extensions required; generation happens in Go via `google/uuid`.
 
-**Why prefixes**: IDs are self-documenting in logs, URLs, and debugging. You can tell `prod_...` apart from `tok_...` by eye.
+**Why shortuuid on the wire**: 22 chars vs 36, round-trips losslessly, URL-safe, preserves the UUID version. Internal code never sees the short form — handlers decode on the way in and encode on the way out.
 
-The `internal/id` package exposes one constructor per entity:
+**How skimatik sets it up.** The generated package exposes a `UUIDv7()` helper. Generated `Create*` methods call the ID generator function passed to the repo constructor — passing `nil` activates the default UUIDv7 generator:
 
 ```go
-// internal/id/generator.go
-package id
-
-import "github.com/segmentio/ksuid"
-
-func NewProductID() string { return "prod_" + ksuid.New().String() }
-func NewAccountID() string { return "acc_"  + ksuid.New().String() }
+func NewProductRepository(db *pgxkit.DB) *ProductRepository {
+    return &ProductRepository{
+        db:                 db,
+        ProductsRepository: generated.NewProductsRepository(nil), // nil = default UUIDv7
+        ProductsQueries:    generated.NewProductsQueries(),
+    }
+}
 ```
 
-Repositories take the constructor as a function value so the ID format can be substituted in tests:
+Tests can substitute a deterministic generator by passing it explicitly:
 
 ```go
-repository.NewProductRepository(db, id.NewProductID)
+// Deterministic IDs for an integration test.
+fixedID := uuid.MustParse("01903abc-1234-7000-8000-000000000001")
+repo := &ProductRepository{
+    db:                 db,
+    ProductsRepository: generated.NewProductsRepository(func() uuid.UUID { return fixedID }),
+    ProductsQueries:    generated.NewProductsQueries(),
+}
 ```
+
+No `internal/id` package. No entity prefixes. See [DATABASE.md](DATABASE.md#id-generation) for the full repository pattern and [API.md](API.md#shortuuid-on-the-wire) for the handler-side encoding.
 
 ## What Does Not Belong in `internal/`
 

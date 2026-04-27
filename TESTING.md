@@ -73,7 +73,7 @@ func TestProductRepository_CRUD(t *testing.T) {
     db := pgxkit.RequireDB(t)   // reads TEST_DATABASE_URL; t.Skip if unreachable
     defer db.Shutdown(ctx)
 
-    repo := repository.NewProductRepository(db, id.NewProductID)
+    repo := repository.NewProductRepository(db)
     // ... run CRUD assertions ...
 }
 ```
@@ -271,7 +271,7 @@ func TestProductRepository_CRUD(t *testing.T) {
     db := pgxkit.RequireDB(t)
     defer db.Shutdown(ctx)
 
-    repo := repository.NewProductRepository(db, id.NewProductID)
+    repo := repository.NewProductRepository(db)
 
     t.Run("Create and Get", func(t *testing.T) {
         product, err := repo.Create(ctx, db, generated.CreateProductsParams{
@@ -316,7 +316,7 @@ func TestProductRepository_ListWithFilters_QueryPlan(t *testing.T) {
 
     // Build the repository over the wrapped db. Every query the repo runs
     // — generated CRUD, custom skimatik queries, all of it — is captured.
-    repo := repository.NewProductRepository(goldenDB, id.NewProductID)
+    repo := repository.NewProductRepository(goldenDB)
 
     // Exercise the repository method. Assertions on correctness are a
     // separate test; here we only care that the plans don't regress.

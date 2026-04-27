@@ -110,6 +110,34 @@ type ProductServiceInterface interface {
 }
 ```
 
+Domain types in `internal/models` use `uuid.UUID` for ID fields:
+
+```go
+// internal/models/product.go
+package models
+
+import (
+    "time"
+
+    "github.com/google/uuid"
+)
+
+type Product struct {
+    ID          uuid.UUID
+    AccountID   uuid.UUID
+    Name        string
+    Description *string
+    Active      bool
+    CreatedAt   time.Time
+    UpdatedAt   time.Time
+}
+
+type GetProductParams struct {
+    AccountID uuid.UUID
+    ProductID uuid.UUID
+}
+```
+
 The handler itself is a plain struct with a constructor:
 
 ```go
@@ -160,13 +188,22 @@ func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetProduct(w http.ResponseWriter, r *http.Request) {
-    val, _ := chikit.HeaderFromContext(r.Context(), "account_id")
-    accountID := val.(string)
-    id := chi.URLParam(r, "id")
+    accountIDVal, _ := chikit.HeaderFromContext(r.Context(), "account_id")
+    accountID, err := shortuuid.ExpandUUID(accountIDVal.(string))
+    if err != nil {
+        chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid account id", "X-Account-ID"))
+        return
+    }
+
+    productID, err := shortuuid.ExpandUUID(chi.URLParam(r, "id"))
+    if err != nil {
+        chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid product id", "id"))
+        return
+    }
 
     product, err := h.productService.GetProduct(r.Context(), models.GetProductParams{
         AccountID: accountID,
-        ProductID: id,
+        ProductID: productID,
     })
     if err != nil {
         handleServiceError(r, err)
@@ -180,7 +217,49 @@ func (h *Handler) GetProduct(w http.ResponseWriter, r *http.Request) {
 Key points:
 - Handlers don't call `w.WriteHeader` or `json.NewEncoder(w).Encode(...)` — `chikit.SetResponse` does both.
 - Handlers don't call `w.WriteHeader(http.StatusBadRequest)` on errors — `chikit.SetError(r, ...)` does.
+- IDs enter the handler as short-form strings (path param, header, JSON field) and are decoded to `uuid.UUID` via `shortuuid.ExpandUUID` before being passed to the service.
 - Error responses are never `200 + {error: ...}` — always non-2xx with a structured body (see *Error Responses* below).
+
+## shortuuid on the Wire
+
+IDs travel over the wire as 22-character base62 strings, via `github.com/nhalm/shortuuid`. Internally every layer below the handler uses `uuid.UUID`.
+
+```go
+import "github.com/nhalm/shortuuid"
+
+// Inbound — path param, header, JSON body
+productID, err := shortuuid.ExpandUUID(chi.URLParam(r, "id"))
+if err != nil {
+    chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid product id", "id"))
+    return
+}
+
+// Outbound — response struct, List cursor
+short, _ := shortuuid.ShortenUUID(product.ID)
+// short -> "2s8gNnj9C5Ubkx4T7W5vZk"
+```
+
+A small helper on the response type keeps encoding in one place:
+
+```go
+type ProductResponse struct {
+    ID        string `json:"id"         example:"2s8gNnj9C5Ubkx4T7W5vZk"`
+    AccountID string `json:"account_id" example:"2s8gNnj9C5Ubkx4T7W5vZk"`
+    // ...
+}
+
+func ProductResponseFromModel(p *models.Product) ProductResponse {
+    id, _       := shortuuid.ShortenUUID(p.ID)
+    accountID, _ := shortuuid.ShortenUUID(p.AccountID)
+    return ProductResponse{
+        ID:        id,
+        AccountID: accountID,
+        // ...
+    }
+}
+```
+
+Response-type `json` fields carrying IDs are always `string` (the encoded form). Domain `*models.X` types use `uuid.UUID` for ID fields. The boundary between the two is the response converter / handler.
 
 ## Request / Response Types
 
@@ -205,7 +284,7 @@ func (r CreateProductRequest) ToServiceModel(accountID string) *models.CreatePro
 }
 
 type ProductResponse struct {
-    ID          string  `json:"id"          example:"prod_2ArTLVPddDx8vZk7CqEbiYp1"`
+    ID          string  `json:"id"          example:"2s8gNnj9C5Ubkx4T7W5vZk"`
     Name        string  `json:"name"`
     Description *string `json:"description,omitempty"`
     Active      bool    `json:"active"`
@@ -214,8 +293,9 @@ type ProductResponse struct {
 }
 
 func ProductResponseFromModel(p *models.Product) ProductResponse {
+    id, _ := shortuuid.ShortenUUID(p.ID)
     return ProductResponse{
-        ID:          p.ID,
+        ID:          id,
         Name:        p.Name,
         Description: p.Description,
         Active:      p.Active,
@@ -230,7 +310,7 @@ func ProductResponseFromModel(p *models.Product) ProductResponse {
 ### Single resource — no envelope
 ```json
 {
-  "id": "prod_2ArTLVPddDx8vZk7CqEbiYp1",
+  "id": "2s8gNnj9C5Ubkx4T7W5vZk",
   "name": "Premium Plan",
   "active": true,
   "created_at": "2025-01-15T10:30:00Z"
@@ -241,14 +321,16 @@ func ProductResponseFromModel(p *models.Product) ProductResponse {
 ```json
 {
   "data": [
-    { "id": "prod_123", "name": "Plan A" },
-    { "id": "prod_456", "name": "Plan B" }
+    { "id": "2s8gNnj9C5Ubkx4T7W5vZk", "name": "Plan A" },
+    { "id": "4RfK9mBvL3XpN2wYq8aEcT", "name": "Plan B" }
   ],
   "has_more": true,
-  "next_cursor": "prod_456",
-  "prev_cursor": "prod_123"
+  "next_cursor": "4RfK9mBvL3XpN2wYq8aEcT",
+  "prev_cursor": "2s8gNnj9C5Ubkx4T7W5vZk"
 }
 ```
+
+Cursors are shortuuid strings because paginated queries return UUIDs and the handler encodes them on the way out.
 
 ### Errors — chikit-shaped
 `chikit.SetError` emits the standard shape:

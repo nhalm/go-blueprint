@@ -33,7 +33,8 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 | [viper](https://github.com/spf13/viper) | Config loader — reads `.env` files and environment variables; backs `config.Load()` | latest |
 | [chi](https://github.com/go-chi/chi) | HTTP router | v5 |
 | [testify](https://github.com/stretchr/testify), [gomock](https://pkg.go.dev/go.uber.org/mock) | Testing | latest |
-| [ksuid](https://github.com/segmentio/ksuid) | Time-ordered IDs | latest |
+| [google/uuid](https://github.com/google/uuid) | UUID type used by skimatik-generated code; skimatik's `UUIDv7()` helper is the default ID generator | v1.6+ |
+| [nhalm/shortuuid](https://github.com/nhalm/shortuuid) | Base62 encoding of UUIDs for wire format (JSON, URL paths) | v1.0+ |
 
 ## Philosophy
 
@@ -65,27 +66,26 @@ Schema is the source of truth. Skimatik generates CRUD + custom queries from `.s
 
 ### Observability via canonlog + chikit → Datadog
 
-`chikit.Handler(chikit.WithCanonlog(), chikit.WithCanonlogFields(...))` attaches a per-request logger to `r.Context()`. Handlers and services accumulate fields via `canonlog.AddRequestFields(ctx, ...)`. One canonical log line per request, shipped to Datadog via a sidecar. Don't introduce OTel/Prometheus — the stack already covers it.
+`chikit.Handler(chikit.WithCanonlog(), chikit.WithCanonlogFields(...))` attaches a per-request logger to `r.Context()`. Handlers and services accumulate fields via `canonlog.AddRequestFields(ctx, ...)`. One canonical log line per request.
 
 ### Provider-Agnostic Schema
 
 Generic column names (`external_payment_id`, `checkout_session_id`) — not `stripe_id`, `adyen_ref`. Keeps integrations swappable.
 
-## Identifiers — Prefixed KSUIDs
+## Identifiers — UUIDv7 internally, shortuuid on the wire
 
-Text primary keys with entity prefixes:
+Primary keys are **UUIDv7** values generated application-side by skimatik's default generator. Internally the type is `uuid.UUID`; Postgres stores them as `UUID`. On the wire (JSON bodies, URL path params) they're encoded as 22-character base62 strings via [`github.com/nhalm/shortuuid`](https://github.com/nhalm/shortuuid) for compactness.
 
 ```
-prod_2ArTLVPddDx8vZk7CqEbiYp1   # Product
-acc_2ArTLVPddDx8vZk7CqEbiYp2    # Account
-tok_2ArTLVPddDx8vZk7CqEbiYp3    # Token
+internal:  01903abc-1234-7def-8000-abcdef012345    (uuid.UUID, UUID column)
+wire:      2s8gNnj9C5Ubkx4T7W5vZk                  (shortuuid-encoded)
 ```
 
-**Why KSUID over UUID**: time-ordered (good index locality), 27 characters (vs 36 for UUID), URL-safe, 128-bit random + timestamp.
+**Why UUIDv7**: time-ordered first 48 bits mean good B-tree index locality for inserts (new rows land at the end), while the value remains a valid RFC 9562 UUID so standard tooling works. No dependence on Postgres extensions — IDs are generated in Go.
 
-**Why prefixes**: IDs are self-documenting in logs, URLs, debugging output. A reader can tell `prod_` from `tok_` at a glance.
+**Why shortuuid on the wire**: 22 chars vs 36, round-trips losslessly, URL-safe, preserves the UUID version. Internal code keeps working with `uuid.UUID` directly; only handlers decode on the way in (`shortuuid.ExpandUUID`) and encode on the way out (`shortuuid.ShortenUUID`).
 
-`internal/id/generator.go` exposes one constructor per entity (`NewProductID()`, `NewAccountID()`). Repositories take the constructor as a function value. See [ARCHITECTURE.md](ARCHITECTURE.md#id-strategy--ksuid-with-prefixes).
+skimatik handles the generation side. When a repository is constructed with `nil` for the ID generator, the generated `Create*` methods call `generated.UUIDv7()` automatically. See [DATABASE.md](DATABASE.md#id-generation) for the repo wiring and [API.md](API.md#shortuuid-on-the-wire) for handler encoding.
 
 ## HTTP Status Codes
 

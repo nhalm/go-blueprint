@@ -11,13 +11,17 @@ go install github.com/nhalm/skimatik/cmd/skimatik@latest
 # pgxkit v2 — connection pooling + Executor interface the generated code uses
 go get github.com/nhalm/pgxkit/v2
 
+# google/uuid — UUID type used by the generated code; skimatik's generator
+# package embeds a UUIDv7() helper backed by uuid.NewV7()
+go get github.com/google/uuid
+
 # golang-migrate — migration driver (used inside cmd/<app>/migrate.go; no binary needed)
 go get github.com/golang-migrate/migrate/v4
 ```
 
 ## Schema Principles
 
-1. **`TEXT PRIMARY KEY`** holding a prefixed KSUID (`prod_...`, `acc_...`). See [ARCHITECTURE.md](ARCHITECTURE.md#id-strategy--ksuid-with-prefixes).
+1. **`UUID PRIMARY KEY`** (no `DEFAULT`). UUIDv7 values are generated app-side by skimatik; the DB column is the plain `UUID` type. See [ARCHITECTURE.md](ARCHITECTURE.md#id-strategy--uuidv7--shortuuid).
 2. **Always** `created_at` + `updated_at` (`TIMESTAMPTZ NOT NULL DEFAULT NOW()`).
 3. **Soft deletes** via `deleted_at TIMESTAMPTZ` (nullable). Filter `WHERE deleted_at IS NULL` in every read query. Hard deletes are a separate cleanup job.
 4. **Provider-agnostic column names**: `external_payment_id`, `checkout_session_id` — not `stripe_id`, `adyen_ref`. Keeps integrations swappable.
@@ -25,8 +29,8 @@ go get github.com/golang-migrate/migrate/v4
 
 ```sql
 CREATE TABLE products (
-    id            TEXT PRIMARY KEY,
-    account_id    TEXT NOT NULL REFERENCES accounts(id),
+    id            UUID PRIMARY KEY,
+    account_id    UUID NOT NULL REFERENCES accounts(id),
     name          VARCHAR(255) NOT NULL,
     description   TEXT,
     active        BOOLEAN NOT NULL DEFAULT true,
@@ -147,6 +151,7 @@ package repository
 import (
     "context"
 
+    "github.com/google/uuid"
     "github.com/nhalm/pgxkit/v2"
     "github.com/yourorg/myapp/internal/models"
     "github.com/yourorg/myapp/internal/repository/generated"
@@ -158,15 +163,15 @@ type ProductRepository struct {
     db *pgxkit.DB
 }
 
-func NewProductRepository(db *pgxkit.DB, idGen func() string) *ProductRepository {
+func NewProductRepository(db *pgxkit.DB) *ProductRepository {
     return &ProductRepository{
-        ProductsRepository: generated.NewProductsRepository(idGen),
+        ProductsRepository: generated.NewProductsRepository(nil), // nil = default UUIDv7
         ProductsQueries:    generated.NewProductsQueries(),
         db:                 db,
     }
 }
 
-func (r *ProductRepository) GetByAccountAndID(ctx context.Context, accountID, id string) (*models.Product, error) {
+func (r *ProductRepository) GetByAccountAndID(ctx context.Context, accountID, id uuid.UUID) (*models.Product, error) {
     row, err := r.GetProductByAccountAndID(ctx, executorFromContext(ctx, r.db), accountID, id)
     if err != nil {
         return nil, translateError(err)
@@ -187,7 +192,44 @@ func toProductModel(p *generated.Products) *models.Product {
 }
 ```
 
-Note that `NewProductsRepository` takes **only** the ID generator, not the db. The db (or transaction) is supplied **per call** via a `pgxkit.Executor` — that's what `executorFromContext` returns. This is what makes transactional orchestration clean at the service layer.
+`generated.NewProductsRepository(nil)` wires in skimatik's default `UUIDv7()` ID generator — every `Create*` call produces a time-sortable UUIDv7. Pass a `func() uuid.UUID` instead of `nil` to override (for deterministic test IDs, or to swap in `UUIDv4` for non-primary-key use cases).
+
+The generated repo stores **only** the ID generator, not the db. The db (or transaction) is supplied **per call** via a `pgxkit.Executor` — that's what `executorFromContext` returns. This is what makes transactional orchestration clean at the service layer.
+
+## ID Generation
+
+Every skimatik run produces a `generated/id_generators.go` with `UUIDv7()` and `UUIDv4()` helpers:
+
+```go
+// internal/repository/generated/id_generators.go (generated)
+package generated
+
+import "github.com/google/uuid"
+
+func UUIDv7() uuid.UUID { id, _ := uuid.NewV7(); return id }
+func UUIDv4() uuid.UUID { return uuid.New() }
+```
+
+When a repo is constructed with `nil`, the generated `Create*` methods call `UUIDv7()` for each insert. This is the default for everything — primary keys across all tables end up as UUIDv7.
+
+**Overriding the default** (rare — for tests or non-PK identifiers):
+
+```go
+// UUIDv4 instead (non-primary-key case, e.g., correlation IDs)
+repo := &MyRepository{
+    MyRepo: generated.NewMyRepository(func() uuid.UUID { return generated.UUIDv4() }),
+    // ...
+}
+
+// Deterministic for tests
+fixed := uuid.MustParse("01903abc-1234-7000-8000-000000000001")
+repo := &MyRepository{
+    MyRepo: generated.NewMyRepository(func() uuid.UUID { return fixed }),
+    // ...
+}
+```
+
+Because IDs are application-generated, the `UUID PRIMARY KEY` column in the schema has **no** `DEFAULT` clause — the `Create*` params always supply the id.
 
 ## Transactions — Context-Carried
 
