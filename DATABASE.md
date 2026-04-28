@@ -190,7 +190,7 @@ Because IDs are application-generated, the `UUID PRIMARY KEY` column in the sche
 
 Services that need to span multiple repositories in one transaction use a `TxManager`:
 
-```go
+```go {file=internal/repository/tx.go}
 // internal/repository/tx.go
 package repository
 

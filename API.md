@@ -8,7 +8,7 @@ The canonical handlers, request/response types, ID-decoding helpers, and routes 
 
 Define the router in `internal/api/routes.go`. Order matters: `chikit.Handler` must run first so every downstream middleware (including auth/header extraction) accumulates into the canonical log for that request.
 
-```go
+```go {file=internal/api/routes.go}
 package api
 
 import (
@@ -142,12 +142,20 @@ type GetProductParams struct {
 
 The handler itself is a plain struct with a constructor:
 
-```go
-// internal/api/handler.go
+```go {file=internal/api/handler.go}
+// Package api is the HTTP transport layer. It defines the Handler, the
+// chikit-based middleware stack (routes.go), the per-resource handlers, and
+// the single switch that translates domain errors into HTTP responses.
 package api
 
 import (
+    "context"
+    "net/http"
+
+    "github.com/nhalm/canonlog"
+    "github.com/nhalm/chikit"
     "github.com/nhalm/pgxkit/v2"
+
     "github.com/yourorg/myapp/internal/config"
 )
 
@@ -372,30 +380,26 @@ Handlers call `handleServiceError(r, err)` for all service errors. See [ERRORS.m
 
 ## Custom Validators
 
-`chikit.Binder()` uses `go-playground/validator`. Register custom tags at startup, once, after handler construction but before `Routes(...)`:
+`chikit.Binder()` uses `go-playground/validator`. Register custom tags at startup, once, after handler construction but before `Routes(...)`. The canonical Products slice uses only standard validator tags (`required`, `max`, `omitempty`); register custom tags here as the service grows.
 
-```go
+```go {file=internal/api/validators.go}
 // internal/api/validators.go
 package api
 
-import (
-    "fmt"
-
-    "github.com/go-playground/validator/v10"
-    "github.com/nhalm/chikit"
-)
-
+// RegisterValidators registers any custom validator tags this service needs.
+// Add registrations as the service grows — example pattern:
+//
+//   import "github.com/nhalm/chikit"
+//   func RegisterValidators() error {
+//       return chikit.RegisterValidation("format", validateFormat)
+//   }
+//
+// Custom validator functions take a validator.FieldLevel and return bool:
+//
+//   func validateFormat(fl validator.FieldLevel) bool { ... }
 func RegisterValidators() error {
-    if err := chikit.RegisterValidation("format", validateFormat); err != nil {
-        return fmt.Errorf("register format validator: %w", err)
-    }
-    if err := chikit.RegisterValidation("storage", validateStorage); err != nil {
-        return fmt.Errorf("register storage validator: %w", err)
-    }
     return nil
 }
-
-func validateFormat(fl validator.FieldLevel) bool { /* ... */ }
 ```
 
 ```go

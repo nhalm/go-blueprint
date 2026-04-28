@@ -1,0 +1,97 @@
+name: Template Smoke — Library Drift
+
+# Runs the full smoke flow against `go get -u ./...` resolved versions of every
+# dependency, on a weekly cadence and on demand. This is the deliberate signal
+# for "a library released something incompatible with the canonical docs."
+# Failures open or update a tracking issue rather than blocking PRs — PR-time
+# CI uses pinned versions for determinism.
+
+on:
+  schedule:
+    - cron: '0 13 * * 1'  # Mondays 13:00 UTC
+  workflow_dispatch:
+  repository_dispatch:
+    types: [lib-released]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run smoke against latest deps
+        id: smoke
+        continue-on-error: true
+        run: |
+          # Override the maintainer Makefile's smoke target to bump deps before
+          # building. The flow is: extract → seed .env → install tools → up
+          # postgres → migrate → skimatik → go get -u → tidy → generate →
+          # build → lint → verify → integration test.
+          make extract-docs
+          cd build/smoke
+          cp .env.example .env
+          make install-tools >/dev/null
+          go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+          docker compose up -d postgres
+          until docker compose exec -T postgres pg_isready -U myapp >/dev/null 2>&1; do sleep 1; done
+          migrate -path internal/database/migrations \
+                  -database "postgres://myapp:myapp_dev@localhost:5432/myapp?sslmode=disable" \
+                  up
+          skimatik generate
+          go get -u ./...
+          go mod tidy
+          go generate ./...
+          go mod tidy
+          goimports -w .
+          go build ./...
+          make lint
+          make verify
+          make test-integration
+          docker compose down -v
+
+      - name: Open / update drift issue
+        if: steps.smoke.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Template smoke: library drift detected';
+            const body = `The weekly drift smoke (\`go get -u ./...\`) failed.\n\n` +
+                         `Run: ${context.payload.repository.html_url}/actions/runs/${context.runId}\n\n` +
+                         `Likely cause: a recent release of pgxkit / chikit / canonlog / skimatik ` +
+                         `changed an API the canonical docs depend on. Pin the offending dep, ` +
+                         `update the canonical doc, then bump the pin in \`examples/_smoke-fixtures/go.mod.tmpl\`.`;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'lib-drift',
+              state: 'open',
+            });
+            if (issues.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['lib-drift'],
+              });
+            }
+
+      - name: Re-fail the job
+        if: steps.smoke.outcome == 'failure'
+        run: exit 1

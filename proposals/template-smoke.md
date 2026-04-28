@@ -1,8 +1,7 @@
 # Template Smoke Testing
 
-**Status:** design draft, not started
-**Owner:** TBD
-**Decision required before building:** EXAMPLE.md extraction vs parallel reference app (Section 6); Tier 2 vs Tier 3 scope
+**Status:** implemented — `make smoke` green end-to-end on 2026-04-28; CI workflows in `.github/workflows/template-smoke.yml` (per-PR) and `.github/workflows/template-smoke-drift.yml` (weekly cron + repository_dispatch).
+**Owner:** Nick Halm
 
 A design document for smoke-testing the blueprint's `templates/` directory — proving that a fresh service scaffolded from the templates actually compiles, lints, and runs the documented daily loop. Includes the unexpected leverage point: the smoke-test fixture is mostly EXAMPLE.md materialized as files, so the smoke test machine-verifies that EXAMPLE.md is executable, not just plausible-looking.
 
@@ -10,12 +9,12 @@ A design document for smoke-testing the blueprint's `templates/` directory — p
 
 Build a CI workflow in the blueprint repo that:
 
-1. Extracts each fenced code block in `EXAMPLE.md` (annotated with a `{file=...}` marker) to its declared path in a temporary directory
-2. Merges the extracted slice with `templates/*` (substituting the placeholder module/binary name) and a small set of un-doc'd fixtures (cmd entry, migration file, go.mod scaffold)
-3. Runs `go build ./...`, `golangci-lint run`, `make migrate-up && make generate && make test-integration` against the temp directory
+1. Extracts each fenced code block annotated `{file=...}` from every canonical doc (EXAMPLE.md, ARCHITECTURE.md, CONFIG.md, DATABASE.md) to its declared path in a temporary directory
+2. Merges the extracted files with `templates/*` (substituting the placeholder module path) and `examples/_smoke-fixtures/go.mod.tmpl`
+3. Runs the full daily loop against the temp directory: `docker compose up postgres`, `make migrate-up`, `make generate` (skimatik regenerates against real schema), `go build ./...`, `golangci-lint run`, `make test-integration`
 4. Cleans up
 
-The blueprint repo's CI fails when any of those steps break. Drift in templates, EXAMPLE.md, or the libraries the blueprint depends on is caught the first time the smoke runs after the change.
+The blueprint repo's CI fails when any of those steps break. Drift in templates, canonical docs, or the libraries the blueprint depends on is caught the first time the smoke runs after the change.
 
 This proposal exists because:
 
@@ -23,7 +22,7 @@ This proposal exists because:
 2. Library churn (`pgxkit`, `chikit`, `canonlog`, `skimatik`) silently invalidates the patterns in `EXAMPLE.md` between blueprint releases.
 3. EXAMPLE.md is the canonical Products slice, but currently nothing proves its code blocks compile against current libraries. We've already shipped one round of bug fixes (cursor format, `Ping` vs `HealthCheck`, missing `error` returns) that a smoke test would have caught at PR time.
 
-It does not exist yet. The decision to build is unmade. This doc captures the design space so the decision can be revisited with full context.
+It does not exist yet. Design decisions are resolved (Section 11); the proposal is ready for execution against the build plan in Section 13.
 
 ## Motivation
 
@@ -90,74 +89,34 @@ This means:
 
 The 25 hand-written files are *exactly* the contents of `EXAMPLE.md`'s code blocks. That's the leverage point this proposal turns on.
 
-## Three Tiers
+## Scope: Full Bootstrap
 
-The smoke test can be built at three levels of completeness. Each tier subsumes the one before it.
-
-### Tier 1 — Static lint of templates only
-
-Run linters against the template files in isolation:
-
-- `yamllint` over `skimatik.yaml`, `lefthook.yml`, `.github/workflows/ci.yml`, `docker-compose.yml`
-- `actionlint` over `.github/workflows/ci.yml`
-- `golangci-lint config verify` over `.golangci.yml`
-- `make -n` over `Makefile` (parses but doesn't execute targets)
-
-**Catches:** ~25% of drift — typos, malformed YAML, broken GitHub Actions syntax, deprecated golangci-lint config schema.
-
-**Misses:** anything that requires the templates to *combine* with Go code, libraries, or each other.
-
-**Cost:** ~hour. Single CI workflow.
-
-### Tier 2 — Compile and lint the assembled service
-
-Tier 1 plus: extract `EXAMPLE.md`, merge with templates, scaffold a complete service in a temp dir, compile and lint it. No Postgres, no Docker.
+The smoke test runs the **complete daily loop** end-to-end: extract canonical docs into a temp directory, merge with templates, stand up Postgres in Docker, run migrations, run `skimatik generate`, build, lint, and exercise the integration test suite.
 
 Steps:
 
-1. Run extractor: parse `EXAMPLE.md`, write each `{file=X}` block to `/tmp/smoke/X`
-2. Copy `templates/*` to `/tmp/smoke/`, applying placeholder substitution (`myapp` → `smoketest`)
-3. Copy `examples/_smoke-fixtures/*` to `/tmp/smoke/` — the small set of files EXAMPLE.md doesn't fully cover (`cmd/<app>/main.go`, `cmd/<app>/root.go`, the migration files, a stub for any package not in EXAMPLE.md)
-4. `go mod init github.com/example/smoketest && go mod tidy`
-5. `go build ./...`
-6. `golangci-lint run`
-7. `go test -short ./...` (unit tests that don't need a DB)
+1. Extractor parses every doc in `--docs`, writes each `{file=PATH}` block to `/tmp/smoke/PATH`
+2. Copy `templates/*` to `/tmp/smoke/`, applying module-path substitution
+3. Render `examples/_smoke-fixtures/go.mod.tmpl` to `/tmp/smoke/go.mod`
+4. `make install-tools` (installs `blueprint-vet`, `blueprint-sql-check`, `golangci-lint`, `skimatik`, `migrate`)
+5. `go mod tidy`
+6. `docker compose up -d postgres` (from templates' docker-compose.yml)
+7. Wait for Postgres healthcheck
+8. `make migrate-up`
+9. `make generate` (skimatik regenerates against the real Postgres schema)
+10. `go build ./...`
+11. `make lint` (golangci-lint)
+12. `make verify` (blueprint-vet conformance — Go AST analyzers + SQL file rules)
+13. `make test-integration`
+14. `docker compose down -v`
 
-**Catches:** ~70% of drift. Anything that breaks compilation against current `pgxkit`, `chikit`, `canonlog`, plus all of Tier 1.
+**Why no staged "lint-only" or "compile-only" intermediate scope.** The blueprint's signature pattern is hand-written wrappers around skimatik-generated code. Those wrappers import `internal/repository/generated/`, which doesn't exist until `make generate` runs against a live Postgres. A "compile only, no Docker" tier either requires a committed snapshot of skimatik output (drifty), excludes the repository layer (defeats the purpose of testing the blueprint's signature pattern), or pretends to work but doesn't. Once Postgres is in CI, running migrations + generate + tests is small marginal cost.
 
-**Misses:** runtime issues — Postgres healthcheck behavior, skimatik regeneration against a real schema, migration apply, golden-test capture, integration test execution.
+**Catches:** drift in `templates/`, drift between canonical docs and current library APIs, skimatik regeneration breakage, migration apply behavior, integration-test wire format, and blueprint-pattern conformance (handler response writing, repository executor routing, layer-direction violations, soft-delete defaults — whatever rules `blueprint-vet` ships at the time the smoke runs). All six fixes from the recent doc-correction round (Section 2) would have been caught here.
 
-**Cost:** ~half a day for the extractor + fixture set + CI workflow. Reference slice is already written (it's EXAMPLE.md); the new code is the extractor (~80 lines), fixture files (~150 lines for `cmd/`, migration, etc.), and CI orchestration.
+**Composes with `blueprint-vet`.** `make verify` runs as part of the smoke flow, so any conformance rule the vet enforces in consumer projects is also enforced against the canonical docs. If a rule lands in `blueprint-vet` and EXAMPLE.md violates it, the smoke test fails until the doc is updated — keeping the docs and the conformance rules in lockstep.
 
-### Tier 3 — Full bootstrap with Docker + Postgres
-
-Tier 2 plus: stand up Postgres, run database-touching make targets, exercise `skimatik generate` against a real schema, run the integration test suite.
-
-Additional steps after Tier 2:
-
-8. `docker compose up -d postgres` (from templates' docker-compose.yml)
-9. `make migrate-up` (apply the migration that's in the smoke fixtures)
-10. `make generate` (skimatik regenerates against the real Postgres schema)
-11. `make test-integration` (full suite hits real DB)
-12. `docker compose down -v`
-
-**Catches:** ~95% of drift. Adds runtime validation of every external dependency. The other 5% is the rare "works on macOS, breaks on Linux" class.
-
-**Misses:** intentional drift between EXAMPLE.md and the un-doc'd smoke fixtures, since they live separately. Also misses anything specific to a real consumer's environment.
-
-**Cost:** ~one day on top of Tier 2. Mostly CI workflow time and flake handling (Docker pulls, healthcheck timeouts, port collisions).
-
-### Recommended scope
-
-**Build Tier 2.** The cost-to-confidence ratio is best:
-
-- Catches 70% of real drift modes
-- Fixes the EXAMPLE.md "is this code correct?" question by making part of it compile
-- Side effect: every PR that edits EXAMPLE.md or `templates/` proves the result still works
-
-**Skip Tier 3 for v1.** Add it later if specific runtime drift (skimatik regen, migration apply behavior) keeps showing up as recurring breakage.
-
-**Skip Tier 1 entirely.** Strictly subsumed by Tier 2.
+**Cost:** Docker setup adds ~60–90s to CI runtime. Flake surface is the standard Postgres-in-CI set: image pull rate limits, healthcheck timeouts, port collisions. Well-trodden territory.
 
 ## The EXAMPLE.md ↔ Reference App Tension
 
@@ -218,6 +177,8 @@ The annotation is parsed by the extractor; markdown renderers ignore it (or rend
 
 Some files appear in EXAMPLE.md as multiple blocks separated by prose (e.g., `internal/api/products.go` is shown in sections — request types, then response types, then handlers). The extractor concatenates blocks that share a `{file=...}` value, in document order, joined with `\n\n`.
 
+**Convention: only the first block per file carries `package` + imports; subsequent blocks are body-only** (types, functions, methods). This matches how humans already write tutorial code and keeps the extractor dumb (~80 lines). Violations fail loudly because the concatenated file won't compile — the smoke test itself is the check.
+
 ```markdown
 ```go {file=internal/api/products.go}
 package api
@@ -238,47 +199,54 @@ type ProductResponse struct {...}
 
 ### Module path substitution
 
-EXAMPLE.md uses `github.com/yourorg/myapp` as the placeholder module path. The extractor substitutes a configurable target module (default: `github.com/example/smoketest`). All occurrences in extracted code are replaced.
+The canonical docs use `github.com/yourorg/myapp` as the placeholder module path. The extractor substitutes a configurable target module (default: `github.com/example/smoketest`). All occurrences in extracted content are replaced via naive string substitution.
 
-### Smoke fixtures directory
+Why naive substitution rather than a unique placeholder like `BLUEPRINT_MODULE_PATH`: the docs need to render as valid, legible Go for the agent audience. `BLUEPRINT_MODULE_PATH/internal/models` doesn't parse and pessimizes the primary reader to defend against a hypothetical false-positive that doesn't exist in current usage. The convention "don't write `github.com/yourorg/myapp` in any non-import context" is enforced by review, and a violation would surface loudly as a compilation failure in the smoke test. If a Go-AST-aware substitution is ever needed (only rewrite inside `import` declarations), upgrade then.
 
-A new `examples/_smoke-fixtures/` directory in the blueprint repo holds files EXAMPLE.md does not provide:
+### Source docs and smoke fixtures
+
+The extractor walks **every doc that contains `{file=...}` markers**, not just EXAMPLE.md. This honors the blueprint's "every pattern is inline" rule: each pattern's canonical home is the doc that already explains it, and the smoke test verifies that doc is executable.
+
+| File the smoke test needs | Source doc |
+|---|---|
+| `cmd/myapp/{main,serve}.go` | ARCHITECTURE.md |
+| `cmd/myapp/{root,migrate}.go` | CONFIG.md |
+| `internal/config/config.go` | CONFIG.md (multi-block) |
+| `internal/repository/tx.go` | DATABASE.md |
+| `internal/repository/errors.go` | ERRORS.md |
+| `internal/database/schema.sql`, migrations, `queries/products.sql` | EXAMPLE.md |
+| `internal/models/product.go`, `internal/errors/errors.go`, `internal/repository/product_repository.go`, `internal/service/*.go`, `internal/api/{products,errors,service_interface}.go` | EXAMPLE.md (Products slice) |
+| `internal/api/{routes,handler,validators}.go` | API.md |
+
+`examples/_smoke-fixtures/` shrinks to **just the files that genuinely can't be a doc code block**:
 
 ```
 examples/_smoke-fixtures/
-├── cmd/
-│   └── myapp/
-│       ├── main.go               # cobra root.Execute
-│       ├── root.go               # cobra.Command, AddCommand for serve/migrate
-│       ├── serve.go              # full RunE with config + DB + handler wiring
-│       └── migrate.go            # full RunE for up/down/version
-├── internal/
-│   ├── config/
-│   │   └── config.go             # config.Config + LoadLogging/LoadDatabase/LoadHTTP/LoadRedis
-│   ├── repository/
-│   │   ├── errors.go             # ErrNotFound, ErrAlreadyExists, translateError
-│   │   └── tx.go                 # TxManager, ContextWithTx, executorFromContext
-│   └── database/
-│       ├── schema.sql
-│       └── migrations/
-│           ├── 000001_create_accounts.up.sql
-│           ├── 000001_create_accounts.down.sql
-│           ├── 000002_create_products.up.sql
-│           └── 000002_create_products.down.sql
 └── go.mod.tmpl                   # module + Go version + dep block; rendered with target module path
 ```
 
-These are blueprint-pattern code that's already documented elsewhere (ARCHITECTURE.md, CONFIG.md, DATABASE.md) but not in EXAMPLE.md. The smoke-fixtures directory is the **executable form** of those docs, and like EXAMPLE.md should be the canonical reference for those patterns.
+Every other "fixture" file lives in its source doc with a `{file=...}` marker. If a pattern doesn't fit naturally in an existing doc, the doc gets extended — the fixtures dir is not a backdoor for un-doc'd code.
 
-(Possible future move: extend the marker convention to other docs, so the smoke fixtures shrink as more files become extractable. v1 keeps them separate to limit scope.)
+**Cross-doc concatenation rule:** the extractor merges blocks for the same `{file=X}` regardless of which doc they came from, in a deterministic order (alphabetical by source doc, then document order within each). A given file should normally be authored in a single doc; cross-doc blocks for the same file are an anti-pattern that the smoke test won't catch directly but that reviewers should reject.
+
+### Library version pinning
+
+`go.mod.tmpl` carries pinned versions for **every** dependency, including the blueprint-controlled libs (`pgxkit`, `chikit`, `canonlog`, `skimatik`). PR-time CI is deterministic: the same blueprint commit produces the same smoke result every run, and bumping a pin is an explicit blueprint PR — same model as any other dependency update.
+
+Lib-drift detection lives in a separate workflow:
+
+- **Weekly cron** (`.github/workflows/template-smoke-drift.yml`) checks out the repo, runs `go get -u ./...` over the smoke output, runs the full smoke flow. On failure, opens or updates a tracking issue with the resolved version diff.
+- **Optional `repository_dispatch`** trigger on each lib repo's release workflow, so a new `pgxkit` release immediately fires the drift workflow rather than waiting for the next cron tick.
+
+Why this split: PR CI must be stable — an unrelated `pgxkit` patch shipped at 11pm shouldn't break the next morning's blueprint PR for reasons the author can't diagnose. The drift workflow is the dedicated signal for "library released, blueprint needs an update," and its failure is non-blocking on PR merges.
 
 ### Extractor behavior
 
-Single Go program at `scripts/extract-example/main.go` (or `cmd/extract-example/` if we eventually package the blueprint repo as a Go module).
+Single Go program at `scripts/extract-docs/main.go` (or `cmd/extract-docs/` if we eventually package the blueprint repo as a Go module).
 
 ```bash
-go run ./scripts/extract-example \
-    --example EXAMPLE.md \
+go run ./scripts/extract-docs \
+    --docs EXAMPLE.md,ARCHITECTURE.md,CONFIG.md,DATABASE.md,ERRORS.md,API.md \
     --fixtures examples/_smoke-fixtures \
     --templates templates \
     --module github.com/example/smoketest \
@@ -287,7 +255,7 @@ go run ./scripts/extract-example \
 
 Behavior:
 
-1. Parse `EXAMPLE.md`. For each fenced code block with a `{file=PATH}` annotation, accumulate content keyed by PATH.
+1. Parse each doc in `--docs`. For each fenced code block with a `{file=PATH}` annotation, accumulate content keyed by PATH (cross-doc, deterministic order).
 2. For each accumulated PATH, write `output/PATH` with concatenated content. Substitute module path.
 3. Walk `templates/`. For each file, read content, substitute `myapp` placeholders, write to corresponding location under `output/`.
 4. Walk `fixtures/`. Copy each file to corresponding location under `output/`. Substitute module path. Render `go.mod.tmpl` to `go.mod` with the target module path.
@@ -297,7 +265,7 @@ If output directory exists, refuse unless `--force` is passed (avoid accidental 
 
 ### Tests for the extractor
 
-Unit tests in `scripts/extract-example/extractor_test.go`:
+Unit tests in `scripts/extract-docs/extractor_test.go`:
 
 - Parses a single `{file=X}` block correctly
 - Concatenates two blocks with same `{file=X}` in document order
@@ -306,7 +274,7 @@ Unit tests in `scripts/extract-example/extractor_test.go`:
 - Errors on `{file=X}` with relative `..` path traversal
 - Handles blocks in any language (`go`, `sql`, `yaml`, etc.)
 
-Tests against representative `EXAMPLE.md` fixtures shipped under `scripts/extract-example/testdata/`.
+Tests against representative markdown fixtures shipped under `scripts/extract-docs/testdata/`.
 
 ## End-to-End Smoke Flow
 
@@ -318,9 +286,9 @@ SMOKE_DIR=$(mktemp -d -t blueprint-smoke-XXXXXX)
 cleanup() { rm -rf "$SMOKE_DIR"; }
 trap cleanup EXIT
 
-# 1. Extract canonical slice + scaffold from templates + fixtures
-go run ./scripts/extract-example \
-    --example EXAMPLE.md \
+# 1. Extract canonical docs + scaffold from templates + go.mod.tmpl
+go run ./scripts/extract-docs \
+    --docs EXAMPLE.md,ARCHITECTURE.md,CONFIG.md,DATABASE.md,ERRORS.md,API.md \
     --fixtures examples/_smoke-fixtures \
     --templates templates \
     --module github.com/example/smoketest \
@@ -328,20 +296,25 @@ go run ./scripts/extract-example \
 
 cd "$SMOKE_DIR"
 
-# 2. Resolve dependencies
+# 2. Install tools (blueprint-vet, golangci-lint, skimatik, migrate)
+make install-tools
+
+# 3. Resolve dependencies (pinned in go.mod.tmpl)
 go mod tidy
 
-# 3. Tier 2 — compile and lint
-go build ./...
-golangci-lint run
-go test -short ./...
-
-# 4. Tier 3 (optional) — runtime
+# 4. Stand up Postgres, run migrations, regenerate skimatik output
 docker compose up -d postgres
 # Wait for healthcheck...
 make migrate-up
 make generate
+
+# 5. Build, lint, conformance check, integration test
+go build ./...
+make lint           # golangci-lint
+make verify         # blueprint-vet + blueprint-sql-check
 make test-integration
+
+# 6. Tear down
 docker compose down -v
 ```
 
@@ -356,12 +329,12 @@ go-blueprint/
 ├── proposals/
 │   └── template-smoke.md             # this proposal
 ├── scripts/
-│   └── extract-example/
+│   └── extract-docs/
 │       ├── main.go                   # ~80 lines
 │       ├── extractor.go              # parse markdown + concat
 │       ├── extractor_test.go
 │       └── testdata/
-│           └── example-minimal.md    # fixture for tests
+│           └── minimal-doc.md        # fixture for tests
 ├── examples/
 │   └── _smoke-fixtures/              # see Section 6
 ├── .github/
@@ -382,20 +355,19 @@ go-blueprint/
 The blueprint repo currently has no Makefile (it's docs). A new `Makefile` at the repo root provides maintainer-facing targets:
 
 ```makefile
-.PHONY: smoke smoke-tier2 smoke-tier3 extract-example
+.PHONY: smoke extract-docs
 
-extract-example:
-	@go run ./scripts/extract-example --output build/smoke
+extract-docs:
+	@go run ./scripts/extract-docs --output build/smoke
 
-smoke: smoke-tier2
-
-smoke-tier2: extract-example
-	@cd build/smoke && go mod tidy && go build ./... && golangci-lint run && go test -short ./...
-
-smoke-tier3: smoke-tier2
+smoke: extract-docs
 	@cd build/smoke && \
+	  make install-tools && \
+	  go mod tidy && \
 	  docker compose up -d postgres && \
-	  make migrate-up && make generate && make test-integration && \
+	  make migrate-up && make generate && \
+	  go build ./... && make lint && make verify && \
+	  make test-integration && \
 	  docker compose down -v
 ```
 
@@ -405,8 +377,8 @@ This is the *blueprint maintainer's* Makefile. Consumers never see it; they see 
 
 | Layer | What runs | When |
 |-------|-----------|------|
-| **Blueprint repo CI** | `make smoke-tier2` (and `smoke-tier3` if built) | Every PR to `nhalm/go-blueprint` |
-| **Pre-commit (blueprint maintainer)** | Optional: `make smoke-tier2` | If fast enough; bypassable |
+| **Blueprint repo CI** | `make smoke` | Every PR to `nhalm/go-blueprint` |
+| **Pre-commit (blueprint maintainer)** | Optional: `make smoke` | If Docker is available locally; bypassable |
 | **Pre-push** | Nothing | Skip |
 | **Consumer side** | Nothing (consumers don't run blueprint smoke) | N/A |
 
@@ -416,78 +388,59 @@ This is a quality gate on *the blueprint*, not on consumer code. Consumer CI run
 
 These should land *with* (or just before) the smoke test infrastructure:
 
-1. **Annotate `EXAMPLE.md` code blocks with `{file=PATH}` markers.** Roughly 15 blocks. No prose changes, just the language-tag line.
+1. **Annotate code blocks across canonical docs with `{file=PATH}` markers.** EXAMPLE.md (the Products slice), ARCHITECTURE.md (`cmd/myapp/`, `internal/repository/tx.go`), CONFIG.md (`internal/config/config.go`), DATABASE.md (`internal/repository/errors.go`, `internal/database/schema.sql`, migrations). No prose changes, just the language-tag line.
 
-2. **Update `EXAMPLE.md`'s file-path comments to be redundant with markers.** Currently each block has a leading comment like `// internal/models/product.go`. Keep the comment for human readers; the marker is for the extractor. They serve different audiences.
+2. **Keep the leading file-path comments in code blocks for human readers.** Each block already has a `// internal/models/product.go` comment; the marker is for the extractor. They serve different audiences.
 
-3. **Adjust `EXAMPLE.md` blocks that are currently fragments to be complete files.** A handful of blocks in EXAMPLE.md show only a section of a file (e.g., the routes.go products subsection). The smoke test needs complete files. Either complete them in EXAMPLE.md, or accept the fragment and concatenate with smoke-fixture content. Decide per block.
+3. **Adjust blocks that are currently fragments to be complete files** (or split a doc's section into multiple `{file=...}` blocks for the same file, per Section 7.2's append rule). The smoke test needs complete files; doc voice tolerates either approach.
 
-4. **Add `examples/_smoke-fixtures/` content.** ~10 small files covering `cmd/myapp/`, `internal/config/`, `internal/repository/{errors,tx}.go`, `internal/database/{schema.sql,migrations/}`. Most of this content already exists as code snippets in ARCHITECTURE.md, CONFIG.md, and DATABASE.md — it just needs to be materialized as actual files.
+4. **Add `examples/_smoke-fixtures/go.mod.tmpl`.** That's the only fixture left — every other "fixture" file lives in its source doc.
 
 5. **Add row to `README.md` docs table for `proposals/template-smoke.md`.** Optional; this proposal currently lives separately and need not be a discoverable doc.
 
-## Open Questions (Resolve Before Building)
+## Design Decisions (all resolved)
 
-1. **Marker convention syntax.** `{file=PATH}` is one option. Alternatives:
-    - `{file: PATH}` (more YAML-like)
-    - `<!-- file: PATH -->` (HTML comment, doesn't appear in any rendered output)
-    - First-line magic comment in the block itself (`// file: PATH` for Go, `-- file: PATH` for SQL)
+1. **Marker convention syntax.** ✅ **Resolved: `{file=PATH}` on the language-tag line.** Verified against GitHub's markdown API — `POST https://api.github.com/markdown` with ` ```go {file=internal/models/product.go}\n…\n``` ` produced byte-equivalent HTML to ` ```go\n…\n``` ` except for the annotated content being completely stripped. Syntax highlighting preserved (same `highlight-source-go` class, same token spans). Pandoc-style `{...}` is the closest thing to a de facto convention for fenced-code attributes.
 
-   Recommendation: `{file=PATH}` on the language-tag line. Some markdown processors (CommonMark + GitHub) treat the info string after the language as opaque, so this round-trips cleanly. Verify against the blueprint repo's rendering.
+2. **Multiple blocks for one file: append or replace?** ✅ **Resolved: append, with the "first block carries package + imports, subsequent blocks are body-only" convention.** Replace is a tutorial idiom that doesn't fit the blueprint's pattern-reference voice; skip `mode=replace` until something demands it. See Section 7.2.
 
-2. **Multiple blocks for one file: append or replace?** Two valid policies for `{file=X}` blocks in document order:
-    - **Append:** all blocks for `X` concatenate. Default behavior described above.
-    - **Replace:** later blocks shadow earlier. Useful for "here's the simple version, now here's the full version" prose patterns, but probably not what we want.
+3. **Smoke-fixtures vs extending source docs.** ✅ **Resolved: extract from every canonical doc, not just EXAMPLE.md.** Each pattern lives in its existing home (ARCHITECTURE.md, CONFIG.md, DATABASE.md) and gets `{file=...}` markers there. `examples/_smoke-fixtures/` shrinks to just `go.mod.tmpl`. Subsumes Q7. See Section 7.3.
 
-   Recommendation: append by default. If replace is ever needed, add `{file=X mode=replace}`.
+4. **Module path substitution: how robust?** ✅ **Resolved: keep `github.com/yourorg/myapp` and use naive string replace.** A unique placeholder breaks doc readability for agents (the primary audience) to defend against a false-positive risk that doesn't exist in current docs. Convention enforced by review; violations fail loudly at compile time. See Section 7.4.
 
-3. **Smoke-fixtures vs extending EXAMPLE.md.** The cleaner long-term direction is to make EXAMPLE.md the source for *every* canonical file (including `cmd/myapp/serve.go`), shrinking the smoke fixtures to nothing. v1 keeps them separate to limit scope. Decide at build time whether to migrate `cmd/` content into EXAMPLE.md too.
+5. **Library version pinning in the smoke `go.mod`.** ✅ **Resolved: pin everything in `go.mod.tmpl`.** PR-time CI is deterministic; bumping pins is an explicit blueprint PR. A separate scheduled workflow (weekly cron, or `repository_dispatch` from each lib repo on release) runs the smoke test against `go get -u ./...` and files an issue if it fails — that's where lib-drift detection lives, decoupled from PR CI. See Section 7.5.
 
-4. **Module path substitution: how robust?** Naive string replace on `github.com/yourorg/myapp` works but breaks if someone writes that string in a comment as an example. Fix: use a unique placeholder string in EXAMPLE.md (e.g., `BLUEPRINT_MODULE_PATH`) that the extractor substitutes. Decide before building.
+6. **Staged tiers (lint-only → compile-only → full bootstrap)?** ✅ **Resolved: skip the tiering, build the full bootstrap directly.** A "compile-only" intermediate scope isn't coherent — the blueprint's signature pattern (hand-written wrappers around skimatik-generated code) needs `make generate` against a live Postgres, so any meaningful smoke test requires Docker anyway. See Section 5.
 
-5. **Library version pinning in the smoke `go.mod`.** Default could be `@latest` for all blueprint deps, or pin to specific tested versions. `@latest` catches drift faster but means a library release immediately breaks the smoke test (which might be desirable — that's the point — or might be flaky). Pinning is reproducible but lags behind real consumer behavior. Recommendation: `@latest` for blueprint-controlled libs (`pgxkit`, `chikit`, `canonlog`, `skimatik`), pinned for everything else.
+7. **Do we extract from other docs (DATABASE.md, ARCHITECTURE.md, CONFIG.md, etc.) too?** ✅ **Resolved by Q3: yes.** Every canonical doc with `{file=...}` markers is a source. Blocks without markers stay illustrative (prose-only fragments are fine). The smoke test verifies that any doc claiming to show a complete file actually compiles.
 
-6. **Tier 3 worth it now or later?** Tier 2 catches the bulk of drift. Tier 3 needs Docker in CI (slower, flakier). Recommendation: build Tier 2, defer Tier 3 until a Tier-2-missed bug actually ships.
-
-7. **Do we extract from other docs (DATABASE.md, ARCHITECTURE.md, CONFIG.md, etc.) too?** Currently this proposal only extracts from EXAMPLE.md. Code blocks in DATABASE.md, etc. are illustrative, often partial, often deliberately not standalone. Pulling them into the smoke test would either require annotating which are extractable (more markers) or smoke fixtures absorb that role. Recommendation: EXAMPLE.md only, smoke-fixtures absorb the rest.
-
-8. **What happens when EXAMPLE.md changes break the smoke test?** This is the design's payoff: PR can't merge until the docs and the code agree. But it also means a doc-only change (rephrasing a paragraph) shouldn't block CI. The extractor only operates on annotated code blocks, so prose edits are safe; code-block edits gate. Verify behavior in tests.
+8. **Doc-only changes and CI cost.** ✅ **Resolved: always run the smoke test, plus a small `paths-ignore` for known-irrelevant files** (`README.md`, `proposals/**`, `LICENSE`, image assets). Pure prose changes inside extractable docs (EXAMPLE.md, ARCHITECTURE.md, CONFIG.md, DATABASE.md) still trigger smoke — by construction they produce byte-identical extraction output, so smoke is deterministic, but running it enforces the discipline that "if you edit this doc, you accept smoke as a gate." A unit test in `scripts/extract-docs/extractor_test.go` codifies that prose-only edits to source docs produce identical output. If PR volume grows enough to feel the ~2-min CI cost, upgrade to a diff-based skip (run extractor against base and head, compare outputs); not worth building speculatively.
 
 ## Build Plan
 
-When ready to execute. Each step ships independently.
+### Step 1 — Prepare canonical docs
 
-### Step 1 — Annotate `EXAMPLE.md` (no tool changes)
+1a. **Audit each canonical doc for which code blocks should become extractable files.** EXAMPLE.md (Products slice), ARCHITECTURE.md (`cmd/myapp/{main,root,serve,migrate}.go`, `internal/repository/tx.go`), CONFIG.md (`internal/config/config.go`), DATABASE.md (`internal/repository/errors.go`, `internal/database/schema.sql`, migration files). Some blocks are already complete files; others are illustrative fragments.
 
-Add `{file=PATH}` markers to canonical code blocks in EXAMPLE.md. No tooling, no CI yet — this just makes EXAMPLE.md ready to be extracted later.
+1b. **Convert fragments to complete files.** Either expand the block in place, or split the doc's section into multiple `{file=...}` blocks for the same file (per Section 7.2's append rule: first block carries package + imports, subsequent blocks are body-only).
 
-Standalone value: the markers also tell agents reading EXAMPLE.md exactly what file each block belongs to. Useful even if extraction never happens.
+1c. **Add `{file=PATH}` markers** to the language-tag line of every block that should be extracted.
 
 ### Step 2 — Build the extractor
 
-Write `scripts/extract-example/`. Tests against minimal fixtures. Run locally; verify it produces sensible output.
+Write `scripts/extract-docs/` (parser, concatenation, module-path substitution, path-traversal guards). Unit tests in `extractor_test.go` covering the cases listed in Section 7.7, including the "prose-only edits to source docs produce identical output" invariant from Q8.
 
-Standalone value: the extractor is a debugging tool. `go run ./scripts/extract-example --output /tmp/check` to see what EXAMPLE.md materializes into.
+### Step 3 — Add `go.mod.tmpl` and the maintainer Makefile, verify locally
 
-### Step 3 — Add smoke fixtures
+Write `examples/_smoke-fixtures/go.mod.tmpl` with pinned versions. Add the top-level maintainer Makefile (Section 9.3). Run `make smoke` locally end-to-end: extract → install-tools → docker compose up postgres → migrate-up → generate → build → lint → verify (blueprint-vet) → test-integration → docker compose down. Resolve any drift surfaced (canonical-doc bugs, conformance violations, missing files) until the flow is green.
 
-Write `examples/_smoke-fixtures/` with the un-doc'd files (`cmd/myapp/`, etc.). Verify the merge works: extractor + fixtures → temp dir → manually `go build ./...` → green.
+### Step 4 — CI workflow
 
-Standalone value: the fixtures double as a concrete reference for material that's currently scattered across ARCHITECTURE.md, CONFIG.md, DATABASE.md.
+Write `.github/workflows/template-smoke.yml`. Runs `make smoke` on every PR with a `paths-ignore` for `README.md`, `proposals/**`, `LICENSE`, image assets. Required check on PRs.
 
-### Step 4 — CI workflow for Tier 2
+### Step 5 — Lib-drift workflow
 
-Write `.github/workflows/template-smoke.yml`. Runs extractor + fixtures + `go build ./... && golangci-lint run && go test -short`. Required check on PRs.
-
-Standalone value: Tier 2 catches the bulk of drift; this is when smoke testing starts paying back.
-
-### Step 5 — Tier 3 (optional, deferred)
-
-Add Docker + Postgres steps to the CI workflow. Run `make migrate-up && make generate && make test-integration`. Mark optional or required based on flake observations.
-
-### Step 6 — Migrate smoke-fixtures back into EXAMPLE.md (optional, deferred)
-
-If smoke-fixtures stay small and stable, leave them. If they grow or feel separate, consider extending EXAMPLE.md to cover `cmd/myapp/` and other currently-fixtured content. Removes the parallel-content surface.
+Write `.github/workflows/template-smoke-drift.yml`. Weekly cron (and optional `repository_dispatch` from each lib repo) that runs the smoke flow with `go get -u ./...` to detect breakage from new lib releases. Failures open or update a tracking issue rather than blocking PRs.
 
 ## References
 
@@ -497,7 +450,7 @@ If smoke-fixtures stay small and stable, leave them. If they grow or feel separa
 - **kubernetes/kubernetes verify scripts:** `hack/verify-*.sh` — large-scale example of repo-self-verification in Go-shop style.
 - **Blueprint repo doc:** [EXAMPLE.md](../EXAMPLE.md) — the canonical slice this proposal makes extractable.
 - **Blueprint repo doc:** [LIBRARIES.md](../LIBRARIES.md) — the verified library surfaces extracted code must compile against.
-- **Sister proposal:** [proposals/blueprint-vet.md](./blueprint-vet.md) — the conformance checker. Composes with this one (smoke test could run `make verify` as a final step once `blueprint-vet` exists).
+- **`blueprint-vet`** ([github.com/nhalm/blueprint-vet](https://github.com/nhalm/blueprint-vet)) — the conformance checker (Go AST analyzers + SQL file rules). Already integrated in `templates/Makefile` via `make install-tools` and `make verify`. The smoke test runs `make verify` as part of its flow; rule rationale and the full rule list live in [`proposals/blueprint-vet.md`](./blueprint-vet.md).
 
 ## Reading This Doc Cold
 
@@ -505,22 +458,26 @@ If you (or a future agent) come back to this without context:
 
 1. **Skim TL;DR + Motivation** to recover the "why."
 2. **Read "The Key Insight"** — that's the core fact this proposal turns on.
-3. **Read Three Tiers** to see what scope choices look like.
+3. **Read "Scope: Full Bootstrap"** to see what the smoke test does.
 4. **Read "The EXAMPLE.md ↔ Reference App Tension"** to understand why we don't just commit a reference app.
 5. **Read Extractor Design + End-to-End Smoke Flow** to see what the work looks like.
-6. **Read Open Questions** — those are the unresolved decisions.
+6. **Read Design Decisions** — all resolved; rationale captured inline.
 7. **Follow Build Plan** in order; each step is independently shippable.
 
 The decisions still to make:
 
-- **Marker syntax** (Section 11.1): `{file=...}` recommended; verify against the blueprint's markdown rendering.
-- **Tier scope** (Section 5): build Tier 2; defer Tier 3.
-- **EXAMPLE.md vs reference app** (Section 6): Resolution C (extract from EXAMPLE.md) recommended.
-- **Module substitution mechanism** (Section 11.4): unique placeholder string in EXAMPLE.md, not raw `github.com/yourorg/myapp`.
+- ✅ **Marker syntax** (Section 11.1): `{file=PATH}` on the language-tag line. Verified against GitHub's markdown API — annotation strips cleanly, syntax highlighting preserved.
+- ✅ **Multi-block concat** (Section 11.2): append; first block carries package + imports.
+- ✅ **Source docs** (Section 11.3 / 11.7): extract from EXAMPLE.md, ARCHITECTURE.md, CONFIG.md, DATABASE.md. Smoke-fixtures shrinks to `go.mod.tmpl`.
+- ✅ **Scope** (Section 5 / 11.6): single full-bootstrap smoke test (Docker + Postgres + skimatik + tests). No staged tiers.
+- **EXAMPLE.md vs reference app** (Section 6): Resolution C (extract from docs, no committed reference app).
+- ✅ **Module substitution** (Section 11.4): keep `github.com/yourorg/myapp`, naive string replace.
+- ✅ **Library pinning** (Section 11.5): pin every dep in `go.mod.tmpl`; lib-drift detection lives in a separate scheduled workflow.
+- ✅ **Doc-only PR cost** (Section 11.8): always run smoke; small `paths-ignore` for known-irrelevant files; defer diff-based skip until PR volume justifies it.
 
 The case still to evaluate:
 
 - **Yes, build:** evidence that EXAMPLE.md or templates have drifted from working since LIBRARIES.md was written. The session that produced LIBRARIES.md surfaced six bugs of this exact shape — a smoke test prevents the recurrence.
 - **No, skip:** if blueprint changes are infrequent enough that manual verification per change is sufficient, and the cost of one shipped breakage per year is acceptable.
 
-The tier-1-only version (~hour, just static linting) is worth doing under almost any scenario. The tier-2 version (~half a day, the recommendation here) is worth doing if blueprint conformance and EXAMPLE.md correctness are both load-bearing. Tier 3 is worth doing only after Tier 2 leaves real drift on the table.
+The full-bootstrap smoke test is worth doing if blueprint conformance and canonical-doc correctness are both load-bearing — once it exists, every PR proves the canonical docs still represent a working service.
