@@ -4,7 +4,7 @@
 
 The blueprint ships executable scaffolding (`templates/`) and canonical docs full of code blocks. The smoke test proves that a fresh service materialized from those docs actually compiles, lints, generates against current skimatik, and runs the daily loop end-to-end. Without it, library churn (`pgxkit`, `chikit`, `canonlog`, `skimatik`) silently invalidates the docs between blueprint releases.
 
-Design rationale and the resolved decisions are in [`proposals/template-smoke.md`](../../proposals/template-smoke.md). This README is operational: how to run it, how to debug it, how to extend it.
+This README is operational — how to run, debug, and extend the smoke setup. Design rationale and resolved decisions are captured inline in this doc and in commit history.
 
 ## TL;DR
 
@@ -86,7 +86,7 @@ If a new file should become extractable from the docs:
 2. Wrap the code block with a `{file=path/to/new-file.go}` annotation on the language-tag line.
 3. Make sure the block is a complete file — `package X` + imports in the first block, body-only in any continuation blocks. If the doc currently shows a fragment, expand it.
 4. Run `make smoke` locally. Iterate until green.
-5. Update the source-doc table in [`proposals/template-smoke.md`](../../proposals/template-smoke.md) §7.3 if the addition crosses doc boundaries.
+5. Update the source-doc table in this README if the addition crosses doc boundaries.
 
 ## Adding a new source doc
 

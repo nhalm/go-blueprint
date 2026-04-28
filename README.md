@@ -22,7 +22,6 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 | [TESTING.md](TESTING.md) | Layer strategy, gomock + testify, `pgxkit.RequireDB`, mounting chikit middleware in handler tests, Makefile targets |
 | [DEVOPS.md](DEVOPS.md) | Docker Compose, Makefile, GitHub Actions CI, `.env` vars, golangci-lint config |
 | `templates/` | Copy-ready non-code scaffolding: `Makefile`, `docker-compose.yml`, `skimatik.yaml`, `.golangci.yml`, `.github/workflows/ci.yml`, `.env.example`, `.gitignore` |
-| [`proposals/`](proposals/) | Design docs for tooling that complements the blueprint. See [`blueprint-vet.md`](proposals/blueprint-vet.md) — a static analyzer that mechanically enforces blueprint conformance (handler response writing, repository executor routing, model ID typing, soft-delete defaults). |
 
 ## Core Packages
 
