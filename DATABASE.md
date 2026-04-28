@@ -141,11 +141,11 @@ type PaginationParams struct {
 }
 
 type PaginationResult[T any] struct {
-    Items        []T
-    HasMore      bool   // More items exist forward
-    HasPrevious  bool   // Items exist backward
-    NextCursor   string
-    BeforeCursor string
+    Items      []T
+    HasMore    bool   // More items exist forward
+    HasPrev    bool   // Items exist backward
+    NextCursor string
+    PrevCursor string
 }
 ```
 
@@ -346,11 +346,15 @@ Full `migrate up` command:
 func runMigrateUp(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
 
-    cfg, err := config.LoadDatabaseOnly()
-    if err != nil {
-        return fmt.Errorf("failed to load config: %w", err)
+    var cfg config.Config
+    if err := config.LoadLogging(&cfg); err != nil {
+        return err
     }
     canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
+
+    if err := config.LoadDatabase(&cfg); err != nil {
+        return err
+    }
 
     m, err := migrate.New("file://internal/database/migrations", cfg.DatabaseURL)
     if err != nil {

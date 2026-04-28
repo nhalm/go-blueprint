@@ -56,9 +56,28 @@ Lower layers never import higher layers. `models` and `errors` are the foundatio
 | `models` | `google/uuid`, stdlib | Domain entities, request/response input types |
 | `errors` | stdlib | Sentinel error values, `ValidationError`/`FieldError` structs |
 | `repository` | `models`, `errors`, generated, `pgxkit/v2` | SQL queries, transaction boundaries |
-| `service` | `models`, `errors`, consumer-owned repo interfaces | Business logic, cross-repo orchestration |
+| `service` | `models`, `errors`, consumer-owned repo interfaces, `repository` (TxManager only) | Business logic, cross-repo orchestration |
 | `api` | `models`, `errors`, consumer-owned service interfaces, `chikit`, `shortuuid` | HTTP transport, request/response mapping, wire ID encoding |
 | `config` | `viper` | Typed config, validation, defaults |
+
+**Service package shape.** Services receive their dependencies (repo interface, config, TxManager if needed) via constructor. No global state, no init functions:
+
+```go
+// internal/service/product_service.go
+package service
+
+type ProductService struct {
+    repo ProductRepository
+    tx   *repository.TxManager
+    cfg  config.Config
+}
+
+func NewProductService(repo ProductRepository, tx *repository.TxManager, cfg config.Config) *ProductService {
+    return &ProductService{repo: repo, tx: tx, cfg: cfg}
+}
+```
+
+`TxManager` is the one case where `service` imports from `repository` directly — it's an infrastructure primitive, not a domain type.
 
 ## Consumer-Owned Interfaces
 
@@ -104,7 +123,7 @@ package api
 
 type Handler struct {
     productService ProductServiceInterface
-    db             *pgxkit.DB
+    db             *pgxkit.DB  // used by /ready to verify database connectivity
     config         config.Config
 }
 ```
@@ -146,7 +165,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 
     productRepo := repository.NewProductRepository(db)
     productSvc := service.NewProductService(productRepo, cfg)
-    handler := api.NewHandler(productSvc, db, cfg)
+    api.RegisterValidators()
+    handler := api.NewHandler(productSvc, db, nil, cfg) // pass a redis Pinger instead of nil when Redis is configured
 
     rateLimitStore := store.NewMemory() // or store.NewRedis(...)
     router := api.Routes(handler, rateLimitStore)
@@ -167,6 +187,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 
     select {
     case err := <-serverErrs:
+        if errors.Is(err, http.ErrServerClosed) {
+            return nil
+        }
         return fmt.Errorf("server error: %w", err)
     case <-shutdown:
         ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

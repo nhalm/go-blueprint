@@ -149,18 +149,55 @@ import (
     "github.com/yourorg/myapp/internal/config"
 )
 
+// Pinger is satisfied by any dependency that exposes a health check (e.g. a Redis client).
+type Pinger interface {
+    Ping(ctx context.Context) error
+}
+
 type Handler struct {
     productService ProductServiceInterface
-    db             *pgxkit.DB
+    db             *pgxkit.DB  // pinged by /ready
+    redis          Pinger      // nil when Redis is not configured
     config         config.Config
 }
 
-func NewHandler(productSvc ProductServiceInterface, db *pgxkit.DB, cfg config.Config) *Handler {
+func NewHandler(productSvc ProductServiceInterface, db *pgxkit.DB, redis Pinger, cfg config.Config) *Handler {
     return &Handler{
         productService: productSvc,
         db:             db,
+        redis:          redis,
         config:         cfg,
     }
+}
+
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+    chikit.SetResponse(r, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+    if err := h.db.Ping(r.Context()); err != nil {
+        canonlog.ErrorAdd(r.Context(), err)
+        chikit.SetError(r, &chikit.APIError{
+            Type:    "internal_error",
+            Code:    "service_unavailable",
+            Message: "Database unavailable",
+            Status:  http.StatusServiceUnavailable,
+        })
+        return
+    }
+    if h.redis != nil {
+        if err := h.redis.Ping(r.Context()); err != nil {
+            canonlog.ErrorAdd(r.Context(), err)
+            chikit.SetError(r, &chikit.APIError{
+                Type:    "internal_error",
+                Code:    "service_unavailable",
+                Message: "Redis unavailable",
+                Status:  http.StatusServiceUnavailable,
+            })
+            return
+        }
+    }
+    chikit.SetResponse(r, http.StatusOK, map[string]string{"status": "ok"})
 }
 ```
 
@@ -189,13 +226,13 @@ func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetProduct(w http.ResponseWriter, r *http.Request) {
     accountIDVal, _ := chikit.HeaderFromContext(r.Context(), "account_id")
-    accountID, err := shortuuid.ExpandUUID(accountIDVal.(string))
+    accountID, err := shortuuid.ExpandUUID(strings.TrimPrefix(accountIDVal.(string), models.PrefixAccount))
     if err != nil {
         chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid account id", "X-Account-ID"))
         return
     }
 
-    productID, err := shortuuid.ExpandUUID(chi.URLParam(r, "id"))
+    productID, err := shortuuid.ExpandUUID(strings.TrimPrefix(chi.URLParam(r, "id"), models.PrefixProduct))
     if err != nil {
         chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid product id", "id"))
         return

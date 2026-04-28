@@ -133,7 +133,7 @@ func TestProductService_CreateProduct(t *testing.T) {
                     Create(gomock.Any(), gomock.Any()).
                     Return(models.Product{}, repository.ErrAlreadyExists)
             },
-            wantErr: apierrors.ErrProductAlreadyExists,
+            wantErr: apierrors.ErrDuplicateName,
         },
     }
 
@@ -203,7 +203,7 @@ func setupTestHandler(t *testing.T) (*Handler, *MockProductServiceInterface, con
         HTTPRequestTimeout:  30 * time.Second,
         MaxRequestBodyBytes: 1024 * 1024,
     }
-    handler := NewHandler(mockSvc, nil, cfg)
+    handler := NewHandler(mockSvc, nil, nil, cfg)
     return handler, mockSvc, cfg
 }
 
@@ -265,7 +265,7 @@ func TestHandler_CreateProduct(t *testing.T) {
             mockSetup: func(m *MockProductServiceInterface) {
                 m.EXPECT().
                     CreateProduct(gomock.Any(), gomock.Any()).
-                    Return(models.Product{}, apierrors.ErrProductAlreadyExists)
+                    Return(models.Product{}, apierrors.ErrDuplicateName)
             },
             wantStatus: http.StatusConflict,
         },

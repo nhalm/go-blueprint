@@ -66,7 +66,7 @@ go mod init github.com/yourorg/myapp
 
 # Lay out directories
 mkdir -p cmd/myapp \
-         internal/{config,models,repository,service,api,errors,id,database} \
+         internal/{config,models,repository,service,api,errors,database} \
          internal/database/migrations \
          internal/repository/queries
 

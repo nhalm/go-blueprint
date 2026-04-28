@@ -220,7 +220,7 @@ func runMigrateUp(cmd *cobra.Command, args []string) error {
         return err
     }
 
-    m, err := migrate.New("file://./migrations", cfg.DatabaseURL)
+    m, err := migrate.New("file://internal/database/migrations", cfg.DatabaseURL)
     if err != nil {
         return fmt.Errorf("failed to create migrator: %w", err)
     }
@@ -278,8 +278,8 @@ Don't `fmt.Println` instead of a structured log event — do both when the user-
 Services and handlers that depend on config fields take a `config.Config` (or a struct that embeds relevant fields) via constructor. This keeps viper out of every package:
 
 ```go
-func NewHandler(svc ProductServiceInterface, db *pgxkit.DB, cfg config.Config) *Handler {
-    return &Handler{productService: svc, db: db, config: cfg}
+func NewHandler(svc ProductServiceInterface, db *pgxkit.DB, redis Pinger, cfg config.Config) *Handler {
+    return &Handler{productService: svc, db: db, redis: redis, config: cfg}
 }
 ```
 
@@ -301,7 +301,7 @@ cfg := config.Config{
     RateLimitRequests:   100,
     RateLimitWindow:     time.Minute,
 }
-handler := api.NewHandler(mockSvc, nil, cfg)
+handler := api.NewHandler(mockSvc, nil, nil, cfg)
 ```
 
 Don't read env vars in tests. If the code under test really cares about env-driven behavior, route it through `config.Config` first.
