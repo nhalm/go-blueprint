@@ -2,18 +2,20 @@
 
 Layer structure, package responsibilities, and dependency flow.
 
+The canonical implementation of every type and signature shown below lives in [EXAMPLE.md](EXAMPLE.md). When this doc and EXAMPLE.md disagree, EXAMPLE.md wins. Library symbols (chikit/canonlog/pgxkit/skimatik/shortuuid) are catalogued in [LIBRARIES.md](LIBRARIES.md).
+
 ## Layer Tree
 
 ```
 cmd/<app>/                  # Cobra entry point — one command per file
   ├── main.go               # Executes root.Execute()
-  ├── root.go               # Root cobra.Command, initConfig (viper .env + AutomaticEnv)
-  ├── serve.go              # runServe — loads Config, wires deps, runs HTTP server
-  ├── migrate.go            # runMigrateUp/Down/Version — uses config.LoadDatabaseOnly()
+  ├── root.go               # Root cobra.Command — registers subcommands only
+  ├── serve.go              # runServe — loads config, wires deps, runs HTTP server
+  ├── migrate.go            # runMigrateUp/Down/Version — uses config.LoadLogging + config.LoadDatabase
   └── <other>.go            # Additional commands (cleanup jobs, docs generator, etc.)
 
 internal/
-  ├── config/               # Typed Config struct + Load() / LoadDatabaseOnly()
+  ├── config/               # Typed Config struct + composable group loaders (LoadLogging, LoadDatabase, LoadHTTP, LoadRedis)
   ├── models/               # Domain entities + input/output types (no internal deps)
   ├── repository/           # Data access — embeds skimatik-generated code
   │   ├── generated/        # skimatik output (may be git-ignored)
@@ -49,14 +51,37 @@ config  ←  cmd, service (when cfg is injected)
 
 Lower layers never import higher layers. `models` and `errors` are the foundation — they import nothing from `internal/*`.
 
+**Pass values across layer boundaries, not pointers.** Functions in interfaces and domain methods accept and return `models.X` values, never `*models.X`. Pointers stay within a layer (e.g., pointer receivers on structs, `*generated.X` inside the repository package). This eliminates nil-pointer error paths at boundaries and makes data flow explicit.
+
 | Package | Imports from | Responsibility |
 |---------|--------------|----------------|
 | `models` | `google/uuid`, stdlib | Domain entities, request/response input types |
 | `errors` | stdlib | Sentinel error values, `ValidationError`/`FieldError` structs |
 | `repository` | `models`, `errors`, generated, `pgxkit/v2` | SQL queries, transaction boundaries |
-| `service` | `models`, `errors`, consumer-owned repo interfaces | Business logic, cross-repo orchestration |
+| `service` | `models`, `errors`, consumer-owned repo interfaces, `repository` (TxManager only) | Business logic, cross-repo orchestration |
 | `api` | `models`, `errors`, consumer-owned service interfaces, `chikit`, `shortuuid` | HTTP transport, request/response mapping, wire ID encoding |
 | `config` | `viper` | Typed config, validation, defaults |
+
+**Service package shape.** Services receive their dependencies via constructor — minimal by default, growing only when used. No global state, no init functions:
+
+```go
+// internal/service/product_service.go
+package service
+
+type ProductService struct {
+    repo ProductRepository
+}
+
+func NewProductService(repo ProductRepository) *ProductService {
+    return &ProductService{repo: repo}
+}
+```
+
+The canonical `ProductService` is in [EXAMPLE.md](EXAMPLE.md#service). Common additions to the constructor:
+
+- `tx *repository.TxManager` — for methods that span multiple repos in one transaction. `TxManager` is the one case where `service` imports from `repository` directly; it's an infrastructure primitive, not a domain type. See [DATABASE.md](DATABASE.md#transactions--context-carried).
+- `cfg config.Config` (or a typed subset) — for business logic that depends on config values: feature flags, rate-limit budgets, encryption-key references.
+- Other repos / other services — for cross-resource orchestration.
 
 ## Consumer-Owned Interfaces
 
@@ -78,8 +103,8 @@ The `//go:generate mockgen` directive lives at the top of the interface file. Bo
 package service
 
 type ProductRepository interface {
-    Create(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-    GetByID(ctx context.Context, params models.GetProductParams) (*models.Product, error)
+    Create(ctx context.Context, req models.CreateProductRequest) (models.Product, error)
+    GetByID(ctx context.Context, params models.GetProductParams) (models.Product, error)
     // ...
 }
 ```
@@ -91,7 +116,7 @@ type ProductRepository interface {
 package api
 
 type ProductServiceInterface interface {
-    CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
+    CreateProduct(ctx context.Context, req models.CreateProductRequest) (models.Product, error)
     // ...
 }
 ```
@@ -102,12 +127,12 @@ package api
 
 type Handler struct {
     productService ProductServiceInterface
-    db             *pgxkit.DB
+    db             *pgxkit.DB  // used by /ready to verify database connectivity
     config         config.Config
 }
 ```
 
-Running `go generate ./...` produces the `mock_*_test.go` files. See [TESTING.md](TESTING.md) for how they're used.
+Running `go generate ./...` produces the `*_interface_mock.go` files. See [TESTING.md](TESTING.md) for how they're used.
 
 ## Explicit Dependency Injection
 
@@ -118,11 +143,18 @@ No DI framework. Each command's `RunE` wires dependencies top-down. Reading `ser
 func runServe(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
 
-    cfg, err := config.Load()
-    if err != nil {
-        return fmt.Errorf("failed to load config: %w", err)
+    var cfg config.Config
+    if err := config.LoadLogging(&cfg); err != nil {
+        return err
     }
     canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
+
+    if err := config.LoadDatabase(&cfg); err != nil {
+        return err
+    }
+    if err := config.LoadHTTP(&cfg); err != nil {
+        return err
+    }
 
     db := pgxkit.NewDB()
     if err := db.Connect(ctx, cfg.DatabaseURL,
@@ -136,8 +168,11 @@ func runServe(cmd *cobra.Command, args []string) error {
     defer db.Shutdown(ctx)
 
     productRepo := repository.NewProductRepository(db)
-    productSvc := service.NewProductService(productRepo, cfg)
-    handler := api.NewHandler(productSvc, db, cfg)
+    productSvc := service.NewProductService(productRepo)
+    if err := api.RegisterValidators(); err != nil {
+        return err
+    }
+    handler := api.NewHandler(productSvc, db, nil, cfg) // pass a redis Pinger instead of nil when Redis is configured
 
     rateLimitStore := store.NewMemory() // or store.NewRedis(...)
     router := api.Routes(handler, rateLimitStore)
@@ -158,6 +193,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 
     select {
     case err := <-serverErrs:
+        if errors.Is(err, http.ErrServerClosed) {
+            return nil
+        }
         return fmt.Errorf("server error: %w", err)
     case <-shutdown:
         ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -179,22 +217,22 @@ Two layers with distinct responsibilities:
 
 **API layer — structural validation.** Struct tags via `validator.v10` (registered through `chikit.Binder()` / `chikit.JSON()`). Catches required fields, length limits, format (email, URL, enum values), custom tags. Run before any service call. Failures map to `chikit.ErrBadRequest` or a structured `chikit.NewValidationError([]chikit.FieldError{...})`.
 
-**Service layer — business validation.** Anything that needs database state or cross-field context (duplicate names, referenced resources exist, transitions allowed). Failures return a domain error from `internal/errors` (typically a sentinel like `errors.ErrDuplicateToken` or a `*errors.ValidationError`), which the API layer translates via `handleServiceError`. See [API.md](API.md#error-mapping) for the full translation table.
+**Service layer — business validation.** Anything that needs database state or cross-field context (duplicate names, referenced resources exist, transitions allowed). Failures return a domain error from `internal/errors` (typically a sentinel like `errors.ErrDuplicateToken` or a `*errors.ValidationError`), which the API layer translates via `handleServiceError`. See [ERRORS.md](ERRORS.md) for the full translation chain.
 
 Don't duplicate. Structural validation only in the API layer, business validation only in the service layer.
 
 ## ID Strategy — UUIDv7 + shortuuid
 
-Primary keys are **UUIDv7** generated app-side by skimatik, stored in Postgres `UUID` columns, carried through Go as `uuid.UUID`, and encoded as 22-char base62 **shortuuid** strings on the wire.
+Primary keys are **UUIDv7** generated app-side by skimatik, stored in Postgres `UUID` columns, carried through Go as `uuid.UUID`, and encoded as prefixed 22-char base62 **shortuuid** strings on the wire.
 
 ```
 internal:  01903abc-1234-7def-8000-abcdef012345    (uuid.UUID field, UUID column)
-wire:      2s8gNnj9C5Ubkx4T7W5vZk                  (shortuuid-encoded JSON + URL params)
+wire:      prod_2s8gNnj9C5Ubkx4T7W5vZk             (prefix + shortuuid, JSON + URL params)
 ```
 
 **Why UUIDv7 over KSUID or UUIDv4**: the first 48 bits are a millisecond timestamp, so rows insert in roughly monotonic order — tight B-tree index locality, like KSUID, but as a standards-compliant UUID that every tool understands. No Postgres extensions required; generation happens in Go via `google/uuid`.
 
-**Why shortuuid on the wire**: 22 chars vs 36, round-trips losslessly, URL-safe, preserves the UUID version. Internal code never sees the short form — handlers decode on the way in and encode on the way out.
+**Why prefixed shortuuid on the wire**: 22-char base62 is compact and URL-safe; the entity prefix (`prod_`, `acc_`) makes IDs self-documenting in logs, URLs, and client code. Internal code never sees the short form — handlers decode on the way in and encode on the way out. Prefix constants live in `internal/models` alongside the entity they identify.
 
 **How skimatik sets it up.** The generated package exposes a `UUIDv7()` helper. Generated `Create*` methods call the ID generator function passed to the repo constructor — passing `nil` activates the default UUIDv7 generator:
 
@@ -220,7 +258,7 @@ repo := &ProductRepository{
 }
 ```
 
-No `internal/id` package. No entity prefixes. See [DATABASE.md](DATABASE.md#id-generation) for the full repository pattern and [API.md](API.md#shortuuid-on-the-wire) for the handler-side encoding.
+No `internal/id` package. Entity prefix constants (`PrefixProduct = "prod_"`) live in `internal/models` and are applied at the handler boundary only — not stored, not seen by lower layers. See [DATABASE.md](DATABASE.md#id-generation) for the full repository pattern and [API.md](API.md#shortuuid-on-the-wire) for the handler-side encoding.
 
 ## What Does Not Belong in `internal/`
 

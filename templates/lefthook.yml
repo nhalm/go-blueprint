@@ -1,0 +1,16 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: fmt
+      run: make fmt
+
+    - name: lint
+      run: make lint
+
+    - name: test
+      run: make test
+
+pre-push:
+  jobs:
+    - name: integration
+      run: make test-integration

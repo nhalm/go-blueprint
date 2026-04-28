@@ -1,4 +1,4 @@
-.PHONY: help setup install-tools build run test test-integration test-db-up test-db-down test-db-migrate lint clean db-up db-down migrate-up migrate-down generate swagger
+.PHONY: help setup install-tools build run fmt test test-integration test-db-up test-db-down test-db-migrate lint clean db-up db-down migrate-up migrate-down generate swagger
 
 TEST_DB_PORT      ?= 15432
 TEST_DB_NAME      ?= myapp_test
@@ -17,6 +17,7 @@ help:
 	@echo "  test-db-up       - Start test PostgreSQL container"
 	@echo "  test-db-down     - Stop and remove test PostgreSQL container"
 	@echo "  test-db-migrate  - Apply migrations to the test database"
+	@echo "  fmt              - Format code with goimports"
 	@echo "  lint             - Run linter"
 	@echo "  db-up            - Start development PostgreSQL"
 	@echo "  db-down          - Stop development PostgreSQL"
@@ -32,6 +33,8 @@ install-tools:
 	@go install github.com/swaggo/swag/cmd/swag@latest
 	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 	@go install go.uber.org/mock/mockgen@latest
+	@go install golang.org/x/tools/cmd/goimports@latest
+	@go install github.com/evilmartians/lefthook@latest
 
 build:
 	@go build -o bin/myapp cmd/myapp/main.go
@@ -66,6 +69,9 @@ test-db-down:
 
 test-db-migrate:
 	@DATABASE_URL="$(TEST_DATABASE_URL)" go run cmd/myapp/main.go migrate up
+
+fmt:
+	@goimports -w .
 
 lint:
 	@golangci-lint run

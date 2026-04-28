@@ -2,6 +2,8 @@
 
 Handlers, middleware, request/response conventions, and error mapping — built on **chikit v1.x** and **canonlog v0.3+**.
 
+The canonical handlers, request/response types, ID-decoding helpers, and routes for the Products resource live in [EXAMPLE.md](EXAMPLE.md). This doc covers patterns that apply across resources; when handler-specific code differs, EXAMPLE.md wins. Every chikit symbol referenced here is defined with its full signature in [LIBRARIES.md](LIBRARIES.md#chikit).
+
 ## Middleware Stack
 
 Define the router in `internal/api/routes.go`. Order matters: `chikit.Handler` must run first so every downstream middleware (including auth/header extraction) accumulates into the canonical log for that request.
@@ -102,11 +104,11 @@ import (
 )
 
 type ProductServiceInterface interface {
-    CreateProduct(ctx context.Context, req *models.CreateProductRequest) (*models.Product, error)
-    GetProduct(ctx context.Context, params models.GetProductParams) (*models.Product, error)
-    UpdateProduct(ctx context.Context, req *models.UpdateProductRequest) (*models.Product, error)
+    CreateProduct(ctx context.Context, req models.CreateProductRequest) (models.Product, error)
+    GetProduct(ctx context.Context, params models.GetProductParams) (models.Product, error)
+    UpdateProduct(ctx context.Context, req models.UpdateProductRequest) (models.Product, error)
     DeleteProduct(ctx context.Context, params models.DeleteProductParams) error
-    ListProducts(ctx context.Context, filter models.ListProductsFilter) (*models.ListProductsResult, error)
+    ListProducts(ctx context.Context, filter models.ListProductsFilter) (models.ListProductsResult, error)
 }
 ```
 
@@ -149,18 +151,55 @@ import (
     "github.com/yourorg/myapp/internal/config"
 )
 
+// Pinger is satisfied by any dependency that exposes a health check (e.g. a Redis client).
+type Pinger interface {
+    Ping(ctx context.Context) error
+}
+
 type Handler struct {
     productService ProductServiceInterface
-    db             *pgxkit.DB
+    db             *pgxkit.DB  // health-checked by /ready
+    redis          Pinger      // nil when Redis is not configured
     config         config.Config
 }
 
-func NewHandler(productSvc ProductServiceInterface, db *pgxkit.DB, cfg config.Config) *Handler {
+func NewHandler(productSvc ProductServiceInterface, db *pgxkit.DB, redis Pinger, cfg config.Config) *Handler {
     return &Handler{
         productService: productSvc,
         db:             db,
+        redis:          redis,
         config:         cfg,
     }
+}
+
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+    chikit.SetResponse(r, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+    if err := h.db.HealthCheck(r.Context()); err != nil {
+        canonlog.ErrorAdd(r.Context(), err)
+        chikit.SetError(r, &chikit.APIError{
+            Type:    "internal_error",
+            Code:    "service_unavailable",
+            Message: "Database unavailable",
+            Status:  http.StatusServiceUnavailable,
+        })
+        return
+    }
+    if h.redis != nil {
+        if err := h.redis.Ping(r.Context()); err != nil {
+            canonlog.ErrorAdd(r.Context(), err)
+            chikit.SetError(r, &chikit.APIError{
+                Type:    "internal_error",
+                Code:    "service_unavailable",
+                Message: "Redis unavailable",
+                Status:  http.StatusServiceUnavailable,
+            })
+            return
+        }
+    }
+    chikit.SetResponse(r, http.StatusOK, map[string]string{"status": "ok"})
 }
 ```
 
@@ -170,8 +209,10 @@ func NewHandler(productSvc ProductServiceInterface, db *pgxkit.DB, cfg config.Co
 
 ```go
 func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
-    val, _ := chikit.HeaderFromContext(r.Context(), "account_id")
-    accountID := val.(string)
+    accountID, ok := accountIDFromContext(r) // decodes shortuuid → uuid.UUID, writes 400 on failure
+    if !ok {
+        return
+    }
 
     var req CreateProductRequest
     if !chikit.JSON(r, &req) {
@@ -186,80 +227,69 @@ func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 
     chikit.SetResponse(r, http.StatusCreated, ProductResponseFromModel(product))
 }
-
-func (h *Handler) GetProduct(w http.ResponseWriter, r *http.Request) {
-    accountIDVal, _ := chikit.HeaderFromContext(r.Context(), "account_id")
-    accountID, err := shortuuid.ExpandUUID(accountIDVal.(string))
-    if err != nil {
-        chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid account id", "X-Account-ID"))
-        return
-    }
-
-    productID, err := shortuuid.ExpandUUID(chi.URLParam(r, "id"))
-    if err != nil {
-        chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid product id", "id"))
-        return
-    }
-
-    product, err := h.productService.GetProduct(r.Context(), models.GetProductParams{
-        AccountID: accountID,
-        ProductID: productID,
-    })
-    if err != nil {
-        handleServiceError(r, err)
-        return
-    }
-
-    chikit.SetResponse(r, http.StatusOK, ProductResponseFromModel(product))
-}
 ```
+
+`accountIDFromContext` and `productIDFromPath` are small helpers in `internal/api/products.go` — see [EXAMPLE.md](EXAMPLE.md#handlers) for the implementations. They centralize the shortuuid decoding so every handler that takes an account or product ID looks the same.
 
 Key points:
 - Handlers don't call `w.WriteHeader` or `json.NewEncoder(w).Encode(...)` — `chikit.SetResponse` does both.
 - Handlers don't call `w.WriteHeader(http.StatusBadRequest)` on errors — `chikit.SetError(r, ...)` does.
-- IDs enter the handler as short-form strings (path param, header, JSON field) and are decoded to `uuid.UUID` via `shortuuid.ExpandUUID` before being passed to the service.
+- IDs enter the handler as short-form strings (path param, header, JSON field) and are decoded to `uuid.UUID` via `shortuuid.ExpandUUID` before being passed to the service. Every layer below the handler sees `uuid.UUID`.
 - Error responses are never `200 + {error: ...}` — always non-2xx with a structured body (see *Error Responses* below).
 
 ## shortuuid on the Wire
 
-IDs travel over the wire as 22-character base62 strings, via `github.com/nhalm/shortuuid`. Internally every layer below the handler uses `uuid.UUID`.
+IDs travel over the wire as prefixed 22-character base62 strings: `prod_2s8gNnj9C5Ubkx4T7W5vZk`. The prefix is the entity type; the suffix is the shortuuid encoding of the internal UUIDv7. Internally every layer below the handler uses `uuid.UUID`.
+
+Prefix constants live in `internal/models` alongside the entity they identify:
 
 ```go
-import "github.com/nhalm/shortuuid"
+// internal/models/product.go
+const PrefixProduct = "prod_"
+```
 
-// Inbound — path param, header, JSON body
-productID, err := shortuuid.ExpandUUID(chi.URLParam(r, "id"))
+```go
+import (
+    "strings"
+
+    "github.com/nhalm/shortuuid"
+    "github.com/yourorg/myapp/internal/models"
+)
+
+// Inbound — strip prefix, then expand
+raw := chi.URLParam(r, "id") // "prod_2s8gNnj9C5Ubkx4T7W5vZk"
+productID, err := shortuuid.ExpandUUID(strings.TrimPrefix(raw, models.PrefixProduct))
 if err != nil {
     chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid product id", "id"))
     return
 }
 
-// Outbound — response struct, List cursor
+// Outbound — shorten, then prepend prefix
 short, _ := shortuuid.ShortenUUID(product.ID)
-// short -> "2s8gNnj9C5Ubkx4T7W5vZk"
+id := models.PrefixProduct + short // "prod_2s8gNnj9C5Ubkx4T7W5vZk"
 ```
 
 A small helper on the response type keeps encoding in one place:
 
 ```go
 type ProductResponse struct {
-    ID        string `json:"id"         example:"2s8gNnj9C5Ubkx4T7W5vZk"`
-    AccountID string `json:"account_id" example:"2s8gNnj9C5Ubkx4T7W5vZk"`
+    ID        string `json:"id"         example:"prod_2s8gNnj9C5Ubkx4T7W5vZk"`
+    AccountID string `json:"account_id" example:"acc_2s8gNnj9C5Ubkx4T7W5vZk"`
     // ...
 }
 
-func ProductResponseFromModel(p *models.Product) ProductResponse {
+func ProductResponseFromModel(p models.Product) ProductResponse {
     id, _       := shortuuid.ShortenUUID(p.ID)
     accountID, _ := shortuuid.ShortenUUID(p.AccountID)
     return ProductResponse{
-        ID:        id,
-        AccountID: accountID,
+        ID:        models.PrefixProduct + id,
+        AccountID: models.PrefixAccount + accountID,
         // ...
     }
 }
 ```
 
-Response-type `json` fields carrying IDs are always `string` (the encoded form). Domain `*models.X` types use `uuid.UUID` for ID fields. The boundary between the two is the response converter / handler.
+Response-type `json` fields carrying IDs are always `string` (the encoded form). Domain `models.X` types use `uuid.UUID` for ID fields. The boundary between the two is the response converter / handler.
 
 ## Request / Response Types
 
@@ -274,8 +304,8 @@ type CreateProductRequest struct {
     Active      bool    `json:"active"`
 }
 
-func (r CreateProductRequest) ToServiceModel(accountID string) *models.CreateProductRequest {
-    return &models.CreateProductRequest{
+func (r CreateProductRequest) ToServiceModel(accountID uuid.UUID) models.CreateProductRequest {
+    return models.CreateProductRequest{
         AccountID:   accountID,
         Name:        r.Name,
         Description: r.Description,
@@ -284,7 +314,7 @@ func (r CreateProductRequest) ToServiceModel(accountID string) *models.CreatePro
 }
 
 type ProductResponse struct {
-    ID          string  `json:"id"          example:"2s8gNnj9C5Ubkx4T7W5vZk"`
+    ID          string  `json:"id"          example:"prod_2s8gNnj9C5Ubkx4T7W5vZk"`
     Name        string  `json:"name"`
     Description *string `json:"description,omitempty"`
     Active      bool    `json:"active"`
@@ -292,10 +322,10 @@ type ProductResponse struct {
     UpdatedAt   string  `json:"updated_at"`
 }
 
-func ProductResponseFromModel(p *models.Product) ProductResponse {
+func ProductResponseFromModel(p models.Product) ProductResponse {
     id, _ := shortuuid.ShortenUUID(p.ID)
     return ProductResponse{
-        ID:          id,
+        ID:          models.PrefixProduct + id,
         Name:        p.Name,
         Description: p.Description,
         Active:      p.Active,
@@ -310,7 +340,7 @@ func ProductResponseFromModel(p *models.Product) ProductResponse {
 ### Single resource — no envelope
 ```json
 {
-  "id": "2s8gNnj9C5Ubkx4T7W5vZk",
+  "id": "prod_2s8gNnj9C5Ubkx4T7W5vZk",
   "name": "Premium Plan",
   "active": true,
   "created_at": "2025-01-15T10:30:00Z"
@@ -321,151 +351,24 @@ func ProductResponseFromModel(p *models.Product) ProductResponse {
 ```json
 {
   "data": [
-    { "id": "2s8gNnj9C5Ubkx4T7W5vZk", "name": "Plan A" },
-    { "id": "4RfK9mBvL3XpN2wYq8aEcT", "name": "Plan B" }
+    { "id": "prod_2s8gNnj9C5Ubkx4T7W5vZk", "name": "Plan A" },
+    { "id": "prod_4RfK9mBvL3XpN2wYq8aEcT", "name": "Plan B" }
   ],
   "has_more": true,
-  "next_cursor": "4RfK9mBvL3XpN2wYq8aEcT",
-  "prev_cursor": "2s8gNnj9C5Ubkx4T7W5vZk"
+  "next_cursor": "eyJjIjoiaWQiLCJ2IjoiMDE5MDNhYmMtMTIzNC03ZGVmLTgwMDAtYWJjZGVmMDEyMzQ1In0",
+  "before_cursor": "eyJjIjoiaWQiLCJ2IjoiMDE5MDNhYmMtMTIzNC03ZGVmLTgwMDAtYWJjZGVmMDEyMzQ2In0"
 }
 ```
 
-Cursors are shortuuid strings because paginated queries return UUIDs and the handler encodes them on the way out.
+Cursors are **opaque base64-encoded JSON tokens emitted by skimatik**. They encode the order-by column and last value internally, but clients should treat them as opaque strings — echo whatever was returned in `next_cursor` or `before_cursor` back as a query parameter on the next request. They are not IDs and are not shortuuid-encoded.
 
 ### Errors — chikit-shaped
-`chikit.SetError` emits the standard shape:
-```json
-{
-  "error": {
-    "type":    "invalid_request_error",
-    "code":    "validation_error",
-    "message": "name is required",
-    "param":   "name"
-  }
-}
-```
 
-Multi-field validation errors use a `fields` array instead of `param`:
-```json
-{
-  "error": {
-    "type":    "invalid_request_error",
-    "code":    "validation_error",
-    "message": "validation failed",
-    "fields": [
-      { "field": "name", "code": "required", "message": "name is required" },
-      { "field": "description", "code": "max", "message": "description must be at most 1000 characters" }
-    ]
-  }
-}
-```
+See [ERRORS.md](ERRORS.md) for the wire format, `handleServiceError`, sentinel definitions, and the full translation chain from DB → repository → service → HTTP.
 
 ## Error Mapping
 
-Services return domain errors from `internal/errors`. The API layer translates them in one place:
-
-```go
-// internal/api/errors.go
-package api
-
-import (
-    "errors"
-    "net/http"
-
-    "github.com/nhalm/canonlog"
-    "github.com/nhalm/chikit"
-    apierrors "github.com/yourorg/myapp/internal/errors"
-)
-
-func handleServiceError(r *http.Request, err error) {
-    // Structured validation errors carry per-field details.
-    var validationErr *apierrors.ValidationError
-    if errors.As(err, &validationErr) {
-        fields := make([]chikit.FieldError, len(validationErr.Fields))
-        for i, f := range validationErr.Fields {
-            fields[i] = chikit.FieldError{Param: f.Field, Code: f.Code, Message: f.Message}
-        }
-        chikit.SetError(r, chikit.NewValidationError(fields))
-        return
-    }
-
-    switch {
-    // Client errors — message is safe to show the caller.
-    case errors.Is(err, apierrors.ErrProductNotFound):
-        chikit.SetError(r, chikit.ErrNotFound.With("Product not found"))
-    case errors.Is(err, apierrors.ErrDuplicateName):
-        chikit.SetError(r, chikit.ErrConflict.With("Product with that name already exists"))
-    case errors.Is(err, apierrors.ErrForbidden):
-        chikit.SetError(r, chikit.ErrForbidden.With("Operation not permitted"))
-    case errors.Is(err, apierrors.ErrInvalidInput):
-        chikit.SetError(r, chikit.ErrBadRequest.With("Invalid input"))
-
-    // Server errors — log full detail via canonlog, return a generic response.
-    case errors.Is(err, apierrors.ErrDatabaseFailed),
-        errors.Is(err, apierrors.ErrEncryptionFailed),
-        errors.Is(err, apierrors.ErrDependencyFailed):
-        canonlog.ErrorAdd(r.Context(), err)
-        chikit.SetError(r, chikit.ErrInternal)
-
-    // Custom status codes.
-    case errors.Is(err, apierrors.ErrServiceUnavailable):
-        canonlog.ErrorAdd(r.Context(), err)
-        chikit.SetError(r, &chikit.APIError{
-            Type:    "internal_error",
-            Code:    "service_unavailable",
-            Message: "Service temporarily unavailable",
-            Status:  http.StatusServiceUnavailable,
-        })
-
-    // Unknown — always log the detail, never leak it.
-    default:
-        canonlog.ErrorAdd(r.Context(), err)
-        chikit.SetError(r, chikit.ErrInternal)
-    }
-}
-```
-
-Rule of thumb: **client-facing message** → `chikit.SetError(r, chikit.ErrXxx.With(...))`. **Server-side diagnostic** → `canonlog.ErrorAdd(r.Context(), err)` AND a generic `chikit.ErrInternal` / custom `APIError` to the client. Never leak SQL/provider errors to the response body.
-
-The sentinel error values (`ErrProductNotFound`, `ErrDatabaseFailed`, etc.) live in `internal/errors/errors.go`:
-
-```go
-// internal/errors/errors.go
-package errors
-
-import "errors"
-
-var (
-    ErrProductNotFound    = errors.New("product not found")
-    ErrDuplicateName      = errors.New("product with that name already exists")
-    ErrForbidden          = errors.New("operation forbidden")
-    ErrInvalidInput       = errors.New("invalid input")
-    ErrDatabaseFailed     = errors.New("database operation failed")
-    ErrEncryptionFailed   = errors.New("encryption failed")
-    ErrDependencyFailed   = errors.New("upstream dependency failed")
-    ErrServiceUnavailable = errors.New("service temporarily unavailable")
-)
-```
-
-Plus the structured validation error for multi-field responses:
-
-```go
-// internal/errors/validation.go
-package errors
-
-type FieldError struct {
-    Field   string `json:"field"`
-    Code    string `json:"code"`
-    Message string `json:"message"`
-}
-
-type ValidationError struct {
-    Fields []FieldError
-}
-
-func (e *ValidationError) Error() string { /* ... */ }
-func NewValidationError(fields ...FieldError) *ValidationError { return &ValidationError{Fields: fields} }
-```
+Handlers call `handleServiceError(r, err)` for all service errors. See [ERRORS.md](ERRORS.md#api-layer--domain--http) for the full implementation.
 
 ## Custom Validators
 
@@ -475,11 +378,21 @@ func NewValidationError(fields ...FieldError) *ValidationError { return &Validat
 // internal/api/validators.go
 package api
 
-import "github.com/nhalm/chikit"
+import (
+    "fmt"
 
-func RegisterValidators() {
-    chikit.RegisterValidation("format", validateFormat)
-    chikit.RegisterValidation("storage", validateStorage)
+    "github.com/go-playground/validator/v10"
+    "github.com/nhalm/chikit"
+)
+
+func RegisterValidators() error {
+    if err := chikit.RegisterValidation("format", validateFormat); err != nil {
+        return fmt.Errorf("register format validator: %w", err)
+    }
+    if err := chikit.RegisterValidation("storage", validateStorage); err != nil {
+        return fmt.Errorf("register storage validator: %w", err)
+    }
+    return nil
 }
 
 func validateFormat(fl validator.FieldLevel) bool { /* ... */ }
@@ -487,7 +400,9 @@ func validateFormat(fl validator.FieldLevel) bool { /* ... */ }
 
 ```go
 // cmd/<app>/serve.go
-api.RegisterValidators()
+if err := api.RegisterValidators(); err != nil {
+    return err
+}
 handler := api.NewHandler(...)
 router := api.Routes(handler, rateLimitStore)
 ```
@@ -498,10 +413,12 @@ Cursor-based — never offset. The repository layer returns a `PaginationResult[
 
 ```go
 func (h *Handler) ListProducts(w http.ResponseWriter, r *http.Request) {
-    val, _ := chikit.HeaderFromContext(r.Context(), "account_id")
-    accountID := val.(string)
+    accountID, ok := accountIDFromContext(r)
+    if !ok {
+        return
+    }
 
-    filter, err := parseListFilter(r, accountID)
+    filter, err := parseListProductsFilter(r, accountID)
     if err != nil {
         chikit.SetError(r, chikit.ErrBadRequest.With(err.Error()))
         return
@@ -519,24 +436,28 @@ func (h *Handler) ListProducts(w http.ResponseWriter, r *http.Request) {
     }
 
     chikit.SetResponse(r, http.StatusOK, ListResponse[ProductResponse]{
-        Data:       responses,
-        HasMore:    result.HasMore,
-        NextCursor: ptrOrEmpty(result.NextCursor),
-        PrevCursor: ptrOrEmpty(result.PrevCursor),
+        Data:         responses,
+        HasMore:      result.HasMore,
+        NextCursor:   result.NextCursor,
+        BeforeCursor: result.BeforeCursor,
     })
 }
 
 type ListResponse[T any] struct {
-    Data       []T    `json:"data"`
-    HasMore    bool   `json:"has_more"`
-    NextCursor string `json:"next_cursor,omitempty"`
-    PrevCursor string `json:"prev_cursor,omitempty"`
+    Data         []T    `json:"data"`
+    HasMore      bool   `json:"has_more"`
+    NextCursor   string `json:"next_cursor,omitempty"`
+    BeforeCursor string `json:"before_cursor,omitempty"`
 }
 ```
 
 ## Swagger
 
-Annotate handlers with standard swaggo tags. Generate with `make swagger` (`swag init -g cmd/<app>/main.go -o docs`).
+Annotate handlers with standard swaggo tags. Generate with:
+
+```bash
+make swagger
+```
 
 ```go
 // CreateProduct godoc

@@ -8,7 +8,6 @@ output:
 
 tables:
   products:
-    functions: ["create", "get", "update", "delete", "list", "paginate"]
 
 queries:
   enabled: true

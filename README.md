@@ -12,9 +12,12 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 
 | File | Contents |
 |------|----------|
+| [EXAMPLE.md](EXAMPLE.md) | **Canonical Products slice** — schema, migration, queries, models, errors, repository, service, handlers, routes, error mapping. Authoritative source for type signatures and wiring; other docs cite it. Start here. |
+| [LIBRARIES.md](LIBRARIES.md) | **Library surface reference** — every chikit / canonlog / pgxkit / skimatik / shortuuid symbol the blueprint commits to using, with verified Go signatures. The contract sheet between blueprint and dependencies. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Layer tree, package responsibilities, consumer-owned interfaces, DI pattern, ID strategy |
-| [CONFIG.md](CONFIG.md) | `internal/config` package, per-command loaders (`Load`, `LoadDatabaseOnly`), canonlog setup timing |
-| [API.md](API.md) | `chikit.Handler` middleware stack, handlers, `chikit.SetResponse` / `SetError`, error mapping, response conventions |
+| [CONFIG.md](CONFIG.md) | `internal/config` package, composable group loaders (`LoadLogging`, `LoadDatabase`, `LoadHTTP`, `LoadRedis`), canonlog setup timing |
+| [API.md](API.md) | `chikit.Handler` middleware stack, handlers, `chikit.SetResponse` / `SetError`, response conventions |
+| [ERRORS.md](ERRORS.md) | Full error chain: DB predicates → repository sentinels → domain errors → HTTP responses, wire format |
 | [DATABASE.md](DATABASE.md) | Schema principles, pgxkit v2 Executor, skimatik config and `.sql` annotations, transactions via context, golang-migrate |
 | [TESTING.md](TESTING.md) | Layer strategy, gomock + testify, `pgxkit.RequireDB`, mounting chikit middleware in handler tests, Makefile targets |
 | [DEVOPS.md](DEVOPS.md) | Docker Compose, Makefile, GitHub Actions CI, `.env` vars, golangci-lint config |
@@ -30,7 +33,7 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 | [canonlog](https://github.com/nhalm/canonlog) | Canonical per-request logging | v0.3+ |
 | [golang-migrate](https://github.com/golang-migrate/migrate) | SQL migrations | v4 |
 | [cobra](https://github.com/spf13/cobra) | CLI framework — subcommands (`serve`, `migrate up`, `migrate down`, etc.) | latest |
-| [viper](https://github.com/spf13/viper) | Config loader — reads `.env` files and environment variables; backs `config.Load()` | latest |
+| [viper](https://github.com/spf13/viper) | Config loader — reads `.env` files and environment variables; backs the group loaders in `internal/config` | latest |
 | [chi](https://github.com/go-chi/chi) | HTTP router | v5 |
 | [testify](https://github.com/stretchr/testify), [gomock](https://pkg.go.dev/go.uber.org/mock) | Testing | latest |
 | [google/uuid](https://github.com/google/uuid) | UUID type used by skimatik-generated code; skimatik's `UUIDv7()` helper is the default ID generator | v1.6+ |
@@ -62,11 +65,11 @@ Schema is the source of truth. Skimatik generates CRUD + custom queries from `.s
 
 ### Per-Command Config
 
-`config.Load()` for `serve`; `config.LoadDatabaseOnly()` for `migrate`. Each command calls its loader, then `canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)`, then does its work. No global singleton, no config read inside handlers. See [CONFIG.md](CONFIG.md).
+Each command calls `config.LoadLogging` first (which initializes viper and sets up canonlog), then the group loaders it needs (`LoadDatabase`, `LoadHTTP`, `LoadRedis`). No global singleton, no config read inside handlers. See [CONFIG.md](CONFIG.md).
 
 ### Observability via canonlog + chikit → Datadog
 
-`chikit.Handler(chikit.WithCanonlog(), chikit.WithCanonlogFields(...))` attaches a per-request logger to `r.Context()`. Handlers and services accumulate fields via `canonlog.AddRequestFields(ctx, ...)`. One canonical log line per request.
+`chikit.Handler(chikit.WithCanonlog(), chikit.WithCanonlogFields(...))` attaches a per-request logger to `r.Context()`. Handlers and services accumulate fields via `canonlog.InfoAdd(ctx, key, value)` (or `InfoAddMany(ctx, fields)` for bulk). One canonical log line per request.
 
 ### Provider-Agnostic Schema
 
@@ -78,7 +81,7 @@ Primary keys are **UUIDv7** values generated application-side by skimatik's defa
 
 ```
 internal:  01903abc-1234-7def-8000-abcdef012345    (uuid.UUID, UUID column)
-wire:      2s8gNnj9C5Ubkx4T7W5vZk                  (shortuuid-encoded)
+wire:      prod_2s8gNnj9C5Ubkx4T7W5vZk              (entity prefix + shortuuid)
 ```
 
 **Why UUIDv7**: time-ordered first 48 bits mean good B-tree index locality for inserts (new rows land at the end), while the value remains a valid RFC 9562 UUID so standard tooling works. No dependence on Postgres extensions — IDs are generated in Go.
@@ -116,7 +119,7 @@ go mod init github.com/yourorg/myapp
 
 # 2. Directory layout
 mkdir -p cmd/myapp \
-         internal/{config,models,repository,service,api,errors,id,database} \
+         internal/{config,models,repository,service,api,errors,database} \
          internal/database/migrations \
          internal/repository/queries
 
@@ -139,4 +142,4 @@ make setup             # runs install-tools + generate
 make run
 ```
 
-For the patterns these files should follow, start at [ARCHITECTURE.md](ARCHITECTURE.md) and read in the order listed in the table above.
+For the patterns these files should follow, read [EXAMPLE.md](EXAMPLE.md) first — it is the canonical implementation that every other doc cites — then [ARCHITECTURE.md](ARCHITECTURE.md) and the remaining docs in the order listed above.
