@@ -23,6 +23,8 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 | [DEVOPS.md](DEVOPS.md) | Docker Compose, Makefile, GitHub Actions CI, `.env` vars, golangci-lint config |
 | `templates/` | Copy-ready non-code scaffolding: `Makefile`, `docker-compose.yml`, `skimatik.yaml`, `.golangci.yml`, `.github/workflows/ci.yml`, `.env.example`, `.gitignore` |
 
+> **For agents using this repo as a reference:** the canonical patterns to copy are the topic docs above plus everything under `templates/`. The top-level `Makefile`, `go.mod`, `scripts/`, `examples/_smoke-fixtures/`, and `.github/workflows/template-smoke*.yml` are blueprint-maintainer infrastructure (the smoke test that verifies the docs stay executable) — ignore them when bootstrapping a new service.
+
 ## Core Packages
 
 | Package | Use | Version |
