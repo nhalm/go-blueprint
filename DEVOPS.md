@@ -29,6 +29,7 @@ See [`templates/Makefile`](templates/Makefile). Available targets:
 - `test` — unit tests only (`-short`, skips integration)
 - `test-integration` — full suite against a local test container
 - `lint` — golangci-lint
+- `verify` — [`blueprint-vet`](https://github.com/nhalm/blueprint-vet) conformance checks (Go AST analyzers + SQL file rules)
 - `db-up` / `db-down` — start/stop dev Postgres
 - `migrate-up` / `migrate-down` — run migrations
 - `generate` — skimatik + go generate
@@ -51,6 +52,21 @@ See [`templates/.env.example`](templates/.env.example). `DATABASE_URL` is the on
 ## Golangci-lint Configuration
 
 See [`templates/.golangci.yml`](templates/.golangci.yml). `internal/repository/generated` is excluded so skimatik's output doesn't trip the lint.
+
+Two blueprint-specific gates, in addition to the standard linters:
+
+- **`forbidigo`: `*pgxkit.DB.Ping`** — `*pgxkit.DB` exposes `HealthCheck` and `IsReady`, not `Ping`. Scoped to `github.com/nhalm/pgxkit/v2` so Redis (which does have `Ping`) is unaffected. Requires `analyze-types: true`.
+- **`forbidigo`: `canonlog.AddRequestFields`** — does not exist; use `canonlog.InfoAdd(ctx, key, value)` or `canonlog.InfoAddMany(ctx, fields)`.
+
+Layer-direction enforcement (`internal/models` cannot import upward; `internal/api` cannot import `repository` directly) lives in the `layerdirection` analyzer in `blueprint-vet`, not here — module-path-agnostic by construction so consumers don't need to rename the rule.
+
+## Conformance Checks — blueprint-vet
+
+[`github.com/nhalm/blueprint-vet`](https://github.com/nhalm/blueprint-vet) is a multichecker plus SQL-file checker that enforces blueprint patterns mechanically. Both binaries are installed by `make install-tools` and run via `make verify`. Rule rationale and the full rule list live in [`proposals/blueprint-vet.md`](proposals/blueprint-vet.md).
+
+```bash
+make verify           # runs blueprint-vet ./... + blueprint-sql-check ./internal/repository/queries
+```
 
 ## Gitignore
 
@@ -98,6 +114,7 @@ make run             # go run cmd/myapp/main.go serve
 make test            # fast unit tests, skip integration
 make test-integration # full suite against the test container
 make lint
+make verify          # blueprint-vet conformance checks
 ```
 
 ### Schema Change

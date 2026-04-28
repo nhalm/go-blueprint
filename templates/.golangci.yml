@@ -1,9 +1,7 @@
+version: "2"
+
 run:
   timeout: 5m
-
-issues:
-  exclude-dirs:
-    - internal/repository/generated
 
 linters:
   default: none
@@ -19,7 +17,19 @@ linters:
     - unparam
     - wastedassign
     - prealloc
+    - forbidigo
   settings:
+    forbidigo:
+      analyze-types: true
+      forbid:
+        # LC-1: *pgxkit.DB has no Ping method; use HealthCheck or IsReady.
+        # Scoped to pgxkit so Redis clients (which do expose Ping) aren't flagged.
+        - pattern: '\.Ping$'
+          pkg: '^github\.com/nhalm/pgxkit/v2$'
+          msg: '*pgxkit.DB does not expose Ping; use HealthCheck or IsReady'
+        # LC-2: canonlog.AddRequestFields does not exist.
+        - pattern: 'canonlog\.AddRequestFields'
+          msg: 'use canonlog.InfoAdd(ctx, key, value) or canonlog.InfoAddMany(ctx, fields)'
     gocritic:
       enabled-tags:
         - diagnostic
@@ -59,6 +69,9 @@ linters:
       min-complexity: 15
     unparam:
       check-exported: false
+  exclusions:
+    paths:
+      - internal/repository/generated
 
 formatters:
   enable:
