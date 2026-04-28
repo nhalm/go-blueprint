@@ -2,6 +2,8 @@
 
 Layer structure, package responsibilities, and dependency flow.
 
+The canonical implementation of every type and signature shown below lives in [EXAMPLE.md](EXAMPLE.md). When this doc and EXAMPLE.md disagree, EXAMPLE.md wins. Library symbols (chikit/canonlog/pgxkit/skimatik/shortuuid) are catalogued in [LIBRARIES.md](LIBRARIES.md).
+
 ## Layer Tree
 
 ```
@@ -60,7 +62,7 @@ Lower layers never import higher layers. `models` and `errors` are the foundatio
 | `api` | `models`, `errors`, consumer-owned service interfaces, `chikit`, `shortuuid` | HTTP transport, request/response mapping, wire ID encoding |
 | `config` | `viper` | Typed config, validation, defaults |
 
-**Service package shape.** Services receive their dependencies (repo interface, config, TxManager if needed) via constructor. No global state, no init functions:
+**Service package shape.** Services receive their dependencies via constructor — minimal by default, growing only when used. No global state, no init functions:
 
 ```go
 // internal/service/product_service.go
@@ -68,16 +70,18 @@ package service
 
 type ProductService struct {
     repo ProductRepository
-    tx   *repository.TxManager
-    cfg  config.Config
 }
 
-func NewProductService(repo ProductRepository, tx *repository.TxManager, cfg config.Config) *ProductService {
-    return &ProductService{repo: repo, tx: tx, cfg: cfg}
+func NewProductService(repo ProductRepository) *ProductService {
+    return &ProductService{repo: repo}
 }
 ```
 
-`TxManager` is the one case where `service` imports from `repository` directly — it's an infrastructure primitive, not a domain type.
+The canonical `ProductService` is in [EXAMPLE.md](EXAMPLE.md#service). Common additions to the constructor:
+
+- `tx *repository.TxManager` — for methods that span multiple repos in one transaction. `TxManager` is the one case where `service` imports from `repository` directly; it's an infrastructure primitive, not a domain type. See [DATABASE.md](DATABASE.md#transactions--context-carried).
+- `cfg config.Config` (or a typed subset) — for business logic that depends on config values: feature flags, rate-limit budgets, encryption-key references.
+- Other repos / other services — for cross-resource orchestration.
 
 ## Consumer-Owned Interfaces
 
@@ -164,8 +168,10 @@ func runServe(cmd *cobra.Command, args []string) error {
     defer db.Shutdown(ctx)
 
     productRepo := repository.NewProductRepository(db)
-    productSvc := service.NewProductService(productRepo, cfg)
-    api.RegisterValidators()
+    productSvc := service.NewProductService(productRepo)
+    if err := api.RegisterValidators(); err != nil {
+        return err
+    }
     handler := api.NewHandler(productSvc, db, nil, cfg) // pass a redis Pinger instead of nil when Redis is configured
 
     rateLimitStore := store.NewMemory() // or store.NewRedis(...)

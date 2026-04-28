@@ -12,6 +12,8 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 
 | File | Contents |
 |------|----------|
+| [EXAMPLE.md](EXAMPLE.md) | **Canonical Products slice** — schema, migration, queries, models, errors, repository, service, handlers, routes, error mapping. Authoritative source for type signatures and wiring; other docs cite it. Start here. |
+| [LIBRARIES.md](LIBRARIES.md) | **Library surface reference** — every chikit / canonlog / pgxkit / skimatik / shortuuid symbol the blueprint commits to using, with verified Go signatures. The contract sheet between blueprint and dependencies. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Layer tree, package responsibilities, consumer-owned interfaces, DI pattern, ID strategy |
 | [CONFIG.md](CONFIG.md) | `internal/config` package, composable group loaders (`LoadLogging`, `LoadDatabase`, `LoadHTTP`, `LoadRedis`), canonlog setup timing |
 | [API.md](API.md) | `chikit.Handler` middleware stack, handlers, `chikit.SetResponse` / `SetError`, response conventions |
@@ -67,7 +69,7 @@ Each command calls `config.LoadLogging` first (which initializes viper and sets 
 
 ### Observability via canonlog + chikit → Datadog
 
-`chikit.Handler(chikit.WithCanonlog(), chikit.WithCanonlogFields(...))` attaches a per-request logger to `r.Context()`. Handlers and services accumulate fields via `canonlog.AddRequestFields(ctx, ...)`. One canonical log line per request.
+`chikit.Handler(chikit.WithCanonlog(), chikit.WithCanonlogFields(...))` attaches a per-request logger to `r.Context()`. Handlers and services accumulate fields via `canonlog.InfoAdd(ctx, key, value)` (or `InfoAddMany(ctx, fields)` for bulk). One canonical log line per request.
 
 ### Provider-Agnostic Schema
 
@@ -140,4 +142,4 @@ make setup             # runs install-tools + generate
 make run
 ```
 
-For the patterns these files should follow, start at [ARCHITECTURE.md](ARCHITECTURE.md) and read in the order listed in the table above.
+For the patterns these files should follow, read [EXAMPLE.md](EXAMPLE.md) first — it is the canonical implementation that every other doc cites — then [ARCHITECTURE.md](ARCHITECTURE.md) and the remaining docs in the order listed above.

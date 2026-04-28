@@ -2,6 +2,8 @@
 
 Layer strategy, mocking with gomock, test DB setup, and test runners.
 
+The canonical service / handler shapes the tests below exercise live in [EXAMPLE.md](EXAMPLE.md). When mock setups or constructor signatures differ, EXAMPLE.md wins. `pgxkit.RequireDB`, `EnableGolden`, and the `*TestDB`/`*DB` type relationship are documented in [LIBRARIES.md](LIBRARIES.md#test-helpers).
+
 ## Layer Strategy
 
 | Layer | Test type | DB | Mocked dependency |
@@ -69,10 +71,9 @@ import "github.com/nhalm/pgxkit/v2"
 func TestProductRepository_CRUD(t *testing.T) {
     if testing.Short() { t.Skip("skipping integration test") }
 
-    ctx := context.Background()
-    db  := pgxkit.RequireDB(t)   // reads TEST_DATABASE_URL; t.Skip if unreachable
-
-    repo := repository.NewProductRepository(db)
+    ctx    := context.Background()
+    testDB := pgxkit.RequireDB(t)        // *pgxkit.TestDB — embeds *pgxkit.DB
+    repo   := repository.NewProductRepository(testDB.DB)
     // ... run CRUD assertions ...
 }
 ```
@@ -80,14 +81,15 @@ func TestProductRepository_CRUD(t *testing.T) {
 `pgxkit.RequireDB(t)`:
 - Reads `TEST_DATABASE_URL`.
 - Calls `t.Skip` if the env var is unset or the DB is unreachable — so unit-only runs don't fail.
-- Registers shutdown cleanup via `t.Cleanup` — do not call `db.Shutdown` manually.
+- Returns a `*pgxkit.TestDB` (not a `*pgxkit.DB`); the embedded `*DB` is reachable as `testDB.DB`. Pass that to constructors that take `*pgxkit.DB`. Methods like `BeginTx`, `Exec`, and `Query` are promoted, so `testDB.BeginTx(ctx, ...)` works directly.
+- Connection lifecycle: process exit reclaims connections, so tests typically don't need to call `Shutdown`. If a long-running suite needs explicit cleanup, register it with `t.Cleanup(func() { testDB.Shutdown(context.Background()) })`.
 
 **CI:** `TEST_DATABASE_URL` must be set before the test run. If it's missing (misconfigured secret, wrong env var name), `RequireDB` silently skips every integration test and the suite reports all-pass. Verify the variable is present as an explicit CI step before running tests.
 
 For test isolation prefer a rolled-back transaction over per-test TRUNCATE:
 
 ```go
-tx, err := db.BeginTx(ctx, pgx.TxOptions{}) // returns *pgxkit.Tx
+tx, err := testDB.BeginTx(ctx, pgx.TxOptions{}) // returns *pgxkit.Tx
 require.NoError(t, err)
 defer tx.Rollback(ctx)  // auto-cleanup; safe even after Commit
 
@@ -99,7 +101,7 @@ When transactions don't fit (DDL tests, multi-connection tests) fall back to a `
 
 ```go
 t.Cleanup(func() {
-    _, _ = db.Exec(context.Background(), "TRUNCATE products CASCADE")
+    _, _ = testDB.Exec(context.Background(), "TRUNCATE products CASCADE")
 })
 ```
 
@@ -133,7 +135,7 @@ func TestProductService_CreateProduct(t *testing.T) {
                     Create(gomock.Any(), gomock.Any()).
                     Return(models.Product{}, repository.ErrAlreadyExists)
             },
-            wantErr: apierrors.ErrDuplicateName,
+            wantErr: apperrors.ErrDuplicateName,
         },
     }
 
@@ -143,7 +145,7 @@ func TestProductService_CreateProduct(t *testing.T) {
             mockRepo := NewMockProductRepository(ctrl)
             tt.mockSetup(mockRepo)
 
-            svc := service.NewProductService(mockRepo, config.Config{})
+            svc := service.NewProductService(mockRepo)
             _, err := svc.CreateProduct(context.Background(), tt.req)
 
             if tt.wantErr != nil {
@@ -265,7 +267,7 @@ func TestHandler_CreateProduct(t *testing.T) {
             mockSetup: func(m *MockProductServiceInterface) {
                 m.EXPECT().
                     CreateProduct(gomock.Any(), gomock.Any()).
-                    Return(models.Product{}, apierrors.ErrDuplicateName)
+                    Return(models.Product{}, apperrors.ErrDuplicateName)
             },
             wantStatus: http.StatusConflict,
         },
@@ -298,7 +300,11 @@ If you need custom validators in a handler test (anything you registered via `ch
 var registerOnce sync.Once
 
 func init() {
-    registerOnce.Do(func() { RegisterValidators() })
+    registerOnce.Do(func() {
+        if err := RegisterValidators(); err != nil {
+            panic(err)
+        }
+    })
 }
 ```
 
@@ -311,12 +317,12 @@ Use rolled-back transactions for isolation. Operations within `txCtx` automatica
 func TestProductRepository_CRUD(t *testing.T) {
     if testing.Short() { t.Skip("skipping integration test") }
 
-    ctx  := context.Background()
-    db   := pgxkit.RequireDB(t)
-    repo := repository.NewProductRepository(db)
+    ctx    := context.Background()
+    testDB := pgxkit.RequireDB(t)
+    repo   := repository.NewProductRepository(testDB.DB)
 
     t.Run("Create and Get", func(t *testing.T) {
-        tx, err := db.BeginTx(ctx, pgx.TxOptions{})
+        tx, err := testDB.BeginTx(ctx, pgx.TxOptions{})
         require.NoError(t, err)
         defer tx.Rollback(ctx)
 
@@ -331,7 +337,10 @@ func TestProductRepository_CRUD(t *testing.T) {
         require.NoError(t, err)
         assert.NotEmpty(t, product.ID)
 
-        fetched, err := repo.GetByAccountAndID(txCtx, accountID, product.ID)
+        fetched, err := repo.GetByID(txCtx, models.GetProductParams{
+            AccountID: accountID,
+            ProductID: product.ID,
+        })
         require.NoError(t, err)
         assert.Equal(t, product.ID, fetched.ID)
     })
@@ -340,7 +349,10 @@ func TestProductRepository_CRUD(t *testing.T) {
     // that can't exist in the DB, so there's no state to leak between subtests.
     // Use txCtx whenever a subtest writes data.
     t.Run("Get missing returns ErrNotFound", func(t *testing.T) {
-        _, err := repo.GetByAccountAndID(ctx, uuid.New(), uuid.New())
+        _, err := repo.GetByID(ctx, models.GetProductParams{
+            AccountID: uuid.New(),
+            ProductID: uuid.New(),
+        })
         require.ErrorIs(t, err, repository.ErrNotFound)
     })
 }

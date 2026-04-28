@@ -2,6 +2,8 @@
 
 Schema design, repositories, queries, and migrations — built on **[pgxkit v2](https://github.com/nhalm/pgxkit/tree/main/docs)**, **[skimatik v0.7+](https://github.com/nhalm/skimatik/tree/main/docs)**, and **golang-migrate**.
 
+The canonical schema, migration, query file, and `ProductRepository` for the Products slice live in [EXAMPLE.md](EXAMPLE.md). This doc covers principles, configuration, and patterns (transactions, ID generation, golden testing) that apply across resources; EXAMPLE.md is the source of truth for the per-resource code. Full pgxkit and skimatik signatures (Executor interface, `*Tx` methods, ConnectOption set, annotation syntax, type mapping table, error predicates) are in [LIBRARIES.md](LIBRARIES.md).
+
 ## Tool Prerequisites
 
 **[skimatik](https://github.com/nhalm/skimatik/tree/main/docs)** — generates type-safe repositories from your PostgreSQL schema:
@@ -30,29 +32,11 @@ go get github.com/golang-migrate/migrate/v4
 
 1. **`UUID PRIMARY KEY`** (no `DEFAULT`). UUIDv7 values are generated app-side by skimatik; the DB column is the plain `UUID` type. See [ARCHITECTURE.md](ARCHITECTURE.md#id-strategy--uuidv7--shortuuid).
 2. **Always** `created_at` + `updated_at` (`TIMESTAMPTZ NOT NULL DEFAULT NOW()`).
-3. **Soft deletes** via `deleted_at TIMESTAMPTZ` (nullable). Filter `WHERE deleted_at IS NULL` in every read query.
+3. **Soft deletes** via `deleted_at TIMESTAMPTZ` (nullable). The default read path filters `WHERE deleted_at IS NULL`. Queries that intentionally include soft-deleted rows (admin views, recovery / "trash" flows, audit / compliance reads) are valid; they're named to make the intent explicit (`*IncludingDeleted`, `*Audit`, `*Trash`, `*AllVersions`) so reviewers can see at a glance whether the omission is deliberate.
 4. **Provider-agnostic column names**: `external_payment_id`, `checkout_session_id` — not `stripe_id`, `adyen_ref`. Keeps integrations swappable.
+5. **Unique indexes that respect soft deletes** use partial indexes filtering `WHERE deleted_at IS NULL`, so re-creation after a soft delete doesn't collide with the tombstone row.
 
-```sql
-CREATE TABLE products (
-    id            UUID PRIMARY KEY,
-    account_id    UUID NOT NULL REFERENCES accounts(id),
-    name          VARCHAR(255) NOT NULL,
-    description   TEXT,
-    active        BOOLEAN NOT NULL DEFAULT true,
-    metadata      JSONB,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at    TIMESTAMPTZ
-);
-
-CREATE INDEX idx_products_account_active
-    ON products(account_id, active);
-
-CREATE UNIQUE INDEX idx_products_account_name
-    ON products(account_id, name)
-    WHERE deleted_at IS NULL;
-```
+The canonical schema for the Products slice — `CREATE TABLE products`, supporting indexes, and the corresponding migration files — lives in [EXAMPLE.md](EXAMPLE.md#schema).
 
 ## skimatik Configuration
 
@@ -94,31 +78,7 @@ make generate   # runs: skimatik generate && go generate ./...
 
 ## Custom SQL Queries
 
-Queries that can't be expressed as plain CRUD live in `.sql` files with skimatik annotations. Each query becomes a method on a generated `*Queries` struct.
-
-```sql
--- internal/repository/queries/products.sql
-
--- name: GetProductByAccountAndID :one
-SELECT id, account_id, name, description, active, metadata, created_at, updated_at
-FROM products
-WHERE account_id = $1
-  AND id = $2
-  AND deleted_at IS NULL;
-
--- name: ListProductsPaginated :paginated
-SELECT id, account_id, name, description, active, created_at, updated_at
-FROM products
-WHERE account_id = $1
-  AND deleted_at IS NULL
-  AND ($2::boolean IS NULL OR active = $2)
-ORDER BY id ASC;
-
--- name: SoftDeleteProduct :exec
-UPDATE products
-SET deleted_at = NOW(), updated_at = NOW()
-WHERE account_id = $1 AND id = $2 AND deleted_at IS NULL;
-```
+Queries that can't be expressed as plain CRUD live in `.sql` files with skimatik annotations. Each annotated query becomes a method on a generated `*Queries` struct. The canonical `products.sql` for the Products slice — `GetProductByAccountAndID :one`, `ListProductsPaginated :paginated`, `UpdateProductByAccountAndID :one`, `SoftDeleteProduct :exec` — lives in [EXAMPLE.md](EXAMPLE.md#queries).
 
 ### Annotation Reference
 
@@ -129,25 +89,11 @@ WHERE account_id = $1 AND id = $2 AND deleted_at IS NULL;
 | `:paginated` | `func(ctx, exec, params..., pagination PaginationParams) (*PaginationResult[Row], error)` | Cursor pagination in both directions. Requires an `ORDER BY` clause. |
 | `:exec`      | `func(ctx, exec, params...) error` | No result set — inserts, updates, deletes. |
 
-For nullable fields, custom pgx types, or struct composition, skimatik supports `-- param:` and `-- result:` override annotations. See the [skimatik docs](https://github.com/nhalm/skimatik/tree/main/docs) for the full syntax.
+For nullable fields and custom Go types, skimatik supports `-- param:` and `-- result:` override annotations — full syntax in [LIBRARIES.md](LIBRARIES.md#query-annotations).
 
-`:paginated` requires an explicit `ORDER BY`. Ascending order uses `>` forward / `<` backward; descending flips that. The generated `PaginationResult[T]`:
+`:paginated` requires an explicit `ORDER BY`. Ascending order uses `>` forward / `<` backward; descending flips that. The generated `PaginationParams` and `PaginationResult[T]` shapes — field names, JSON tags, defaults — are in [LIBRARIES.md](LIBRARIES.md#generated-runtime--pagination).
 
-```go
-type PaginationParams struct {
-    Limit        int    // Default 20, max 100
-    NextCursor   string // For forward pagination
-    BeforeCursor string // For backward pagination
-}
-
-type PaginationResult[T any] struct {
-    Items      []T
-    HasMore    bool   // More items exist forward
-    HasPrev    bool   // Items exist backward
-    NextCursor string
-    PrevCursor string
-}
-```
+Cursors are **opaque base64-encoded JSON** — the column name + last value are encoded together. Clients must echo cursors back unchanged; never construct or decode them by hand. The blueprint's models match skimatik's field names (`NextCursor`/`BeforeCursor`, `HasPrevious`) so cursors pass through the repository → service → handler chain without renaming churn.
 
 ## Repository Pattern
 
@@ -340,52 +286,11 @@ myapp migrate down     # rollback one
 myapp migrate version  # show current version + dirty flag
 ```
 
-Full `migrate up` command:
+The full canonical `runMigrateUp` implementation is in [CONFIG.md](CONFIG.md#migrate-up) — that doc owns the per-command-config pattern this command illustrates. Two notes that belong here on the database side:
 
-```go
-func runMigrateUp(cmd *cobra.Command, args []string) error {
-    ctx := context.Background()
+**Dual output.** The command emits both a structured `canonlog` event (for Datadog) and a plain `fmt.Printf` line (for the operator watching the terminal). Both are correct — see the [CONFIG.md logging note](CONFIG.md#logging-during-cli-commands).
 
-    var cfg config.Config
-    if err := config.LoadLogging(&cfg); err != nil {
-        return err
-    }
-    canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
-
-    if err := config.LoadDatabase(&cfg); err != nil {
-        return err
-    }
-
-    m, err := migrate.New("file://internal/database/migrations", cfg.DatabaseURL)
-    if err != nil {
-        return fmt.Errorf("failed to create migrator: %w", err)
-    }
-    defer m.Close()
-
-    if err := m.Up(); err != nil {
-        if errors.Is(err, migrate.ErrNoChange) {
-            log := canonlog.New()
-            log.InfoAdd("component", "migrate").InfoAdd("direction", "up")
-            log.Flush(ctx)
-            fmt.Println("Database is up to date")
-            return nil
-        }
-        return fmt.Errorf("migration up failed: %w", err)
-    }
-
-    version, dirty, _ := m.Version()
-    log := canonlog.New()
-    log.InfoAdd("component", "migrate").InfoAdd("direction", "up").
-        InfoAdd("version", version).InfoAdd("dirty", dirty)
-    log.Flush(ctx)
-    fmt.Printf("Migrations applied successfully. Current version: %d\n", version)
-    return nil
-}
-```
-
-Note the dual output: structured `canonlog` event for observability + plain `fmt.Printf` for the human running the command. Both are correct — see the [CONFIG.md logging note](CONFIG.md#logging-during-cli-commands).
-
-The migration source path is relative to the working directory at runtime. In a container the binary typically isn't at the project root — embed migration files with `//go:embed` or pass the path via config rather than hardcoding a relative path.
+**Migration source path.** The example uses `file://internal/database/migrations`, relative to the working directory at runtime. In a container the binary typically isn't at the project root — embed migration files with `//go:embed` or pass the path via config rather than hardcoding a relative path.
 
 `migrate down` rolls back exactly one version. Treat down migrations as a last resort in production — column drops and renames are irreversible. Write down migrations for dev convenience, not production rollback.
 

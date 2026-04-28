@@ -2,6 +2,8 @@
 
 Handlers, middleware, request/response conventions, and error mapping — built on **chikit v1.x** and **canonlog v0.3+**.
 
+The canonical handlers, request/response types, ID-decoding helpers, and routes for the Products resource live in [EXAMPLE.md](EXAMPLE.md). This doc covers patterns that apply across resources; when handler-specific code differs, EXAMPLE.md wins. Every chikit symbol referenced here is defined with its full signature in [LIBRARIES.md](LIBRARIES.md#chikit).
+
 ## Middleware Stack
 
 Define the router in `internal/api/routes.go`. Order matters: `chikit.Handler` must run first so every downstream middleware (including auth/header extraction) accumulates into the canonical log for that request.
@@ -156,7 +158,7 @@ type Pinger interface {
 
 type Handler struct {
     productService ProductServiceInterface
-    db             *pgxkit.DB  // pinged by /ready
+    db             *pgxkit.DB  // health-checked by /ready
     redis          Pinger      // nil when Redis is not configured
     config         config.Config
 }
@@ -175,7 +177,7 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
-    if err := h.db.Ping(r.Context()); err != nil {
+    if err := h.db.HealthCheck(r.Context()); err != nil {
         canonlog.ErrorAdd(r.Context(), err)
         chikit.SetError(r, &chikit.APIError{
             Type:    "internal_error",
@@ -207,8 +209,10 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 
 ```go
 func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
-    val, _ := chikit.HeaderFromContext(r.Context(), "account_id")
-    accountID := val.(string)
+    accountID, ok := accountIDFromContext(r) // decodes shortuuid → uuid.UUID, writes 400 on failure
+    if !ok {
+        return
+    }
 
     var req CreateProductRequest
     if !chikit.JSON(r, &req) {
@@ -223,38 +227,14 @@ func (h *Handler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 
     chikit.SetResponse(r, http.StatusCreated, ProductResponseFromModel(product))
 }
-
-func (h *Handler) GetProduct(w http.ResponseWriter, r *http.Request) {
-    accountIDVal, _ := chikit.HeaderFromContext(r.Context(), "account_id")
-    accountID, err := shortuuid.ExpandUUID(strings.TrimPrefix(accountIDVal.(string), models.PrefixAccount))
-    if err != nil {
-        chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid account id", "X-Account-ID"))
-        return
-    }
-
-    productID, err := shortuuid.ExpandUUID(strings.TrimPrefix(chi.URLParam(r, "id"), models.PrefixProduct))
-    if err != nil {
-        chikit.SetError(r, chikit.ErrBadRequest.WithParam("Invalid product id", "id"))
-        return
-    }
-
-    product, err := h.productService.GetProduct(r.Context(), models.GetProductParams{
-        AccountID: accountID,
-        ProductID: productID,
-    })
-    if err != nil {
-        handleServiceError(r, err)
-        return
-    }
-
-    chikit.SetResponse(r, http.StatusOK, ProductResponseFromModel(product))
-}
 ```
+
+`accountIDFromContext` and `productIDFromPath` are small helpers in `internal/api/products.go` — see [EXAMPLE.md](EXAMPLE.md#handlers) for the implementations. They centralize the shortuuid decoding so every handler that takes an account or product ID looks the same.
 
 Key points:
 - Handlers don't call `w.WriteHeader` or `json.NewEncoder(w).Encode(...)` — `chikit.SetResponse` does both.
 - Handlers don't call `w.WriteHeader(http.StatusBadRequest)` on errors — `chikit.SetError(r, ...)` does.
-- IDs enter the handler as short-form strings (path param, header, JSON field) and are decoded to `uuid.UUID` via `shortuuid.ExpandUUID` before being passed to the service.
+- IDs enter the handler as short-form strings (path param, header, JSON field) and are decoded to `uuid.UUID` via `shortuuid.ExpandUUID` before being passed to the service. Every layer below the handler sees `uuid.UUID`.
 - Error responses are never `200 + {error: ...}` — always non-2xx with a structured body (see *Error Responses* below).
 
 ## shortuuid on the Wire
@@ -324,7 +304,7 @@ type CreateProductRequest struct {
     Active      bool    `json:"active"`
 }
 
-func (r CreateProductRequest) ToServiceModel(accountID string) models.CreateProductRequest {
+func (r CreateProductRequest) ToServiceModel(accountID uuid.UUID) models.CreateProductRequest {
     return models.CreateProductRequest{
         AccountID:   accountID,
         Name:        r.Name,
@@ -375,12 +355,12 @@ func ProductResponseFromModel(p models.Product) ProductResponse {
     { "id": "prod_4RfK9mBvL3XpN2wYq8aEcT", "name": "Plan B" }
   ],
   "has_more": true,
-  "next_cursor": "prod_4RfK9mBvL3XpN2wYq8aEcT",
-  "prev_cursor": "prod_2s8gNnj9C5Ubkx4T7W5vZk"
+  "next_cursor": "eyJjIjoiaWQiLCJ2IjoiMDE5MDNhYmMtMTIzNC03ZGVmLTgwMDAtYWJjZGVmMDEyMzQ1In0",
+  "before_cursor": "eyJjIjoiaWQiLCJ2IjoiMDE5MDNhYmMtMTIzNC03ZGVmLTgwMDAtYWJjZGVmMDEyMzQ2In0"
 }
 ```
 
-Cursors are shortuuid strings because paginated queries return UUIDs and the handler encodes them on the way out.
+Cursors are **opaque base64-encoded JSON tokens emitted by skimatik**. They encode the order-by column and last value internally, but clients should treat them as opaque strings — echo whatever was returned in `next_cursor` or `before_cursor` back as a query parameter on the next request. They are not IDs and are not shortuuid-encoded.
 
 ### Errors — chikit-shaped
 
@@ -398,11 +378,21 @@ Handlers call `handleServiceError(r, err)` for all service errors. See [ERRORS.m
 // internal/api/validators.go
 package api
 
-import "github.com/nhalm/chikit"
+import (
+    "fmt"
 
-func RegisterValidators() {
-    chikit.RegisterValidation("format", validateFormat)
-    chikit.RegisterValidation("storage", validateStorage)
+    "github.com/go-playground/validator/v10"
+    "github.com/nhalm/chikit"
+)
+
+func RegisterValidators() error {
+    if err := chikit.RegisterValidation("format", validateFormat); err != nil {
+        return fmt.Errorf("register format validator: %w", err)
+    }
+    if err := chikit.RegisterValidation("storage", validateStorage); err != nil {
+        return fmt.Errorf("register storage validator: %w", err)
+    }
+    return nil
 }
 
 func validateFormat(fl validator.FieldLevel) bool { /* ... */ }
@@ -410,7 +400,9 @@ func validateFormat(fl validator.FieldLevel) bool { /* ... */ }
 
 ```go
 // cmd/<app>/serve.go
-api.RegisterValidators()
+if err := api.RegisterValidators(); err != nil {
+    return err
+}
 handler := api.NewHandler(...)
 router := api.Routes(handler, rateLimitStore)
 ```
@@ -421,10 +413,12 @@ Cursor-based — never offset. The repository layer returns a `PaginationResult[
 
 ```go
 func (h *Handler) ListProducts(w http.ResponseWriter, r *http.Request) {
-    val, _ := chikit.HeaderFromContext(r.Context(), "account_id")
-    accountID := val.(string)
+    accountID, ok := accountIDFromContext(r)
+    if !ok {
+        return
+    }
 
-    filter, err := parseListFilter(r, accountID)
+    filter, err := parseListProductsFilter(r, accountID)
     if err != nil {
         chikit.SetError(r, chikit.ErrBadRequest.With(err.Error()))
         return
@@ -442,18 +436,18 @@ func (h *Handler) ListProducts(w http.ResponseWriter, r *http.Request) {
     }
 
     chikit.SetResponse(r, http.StatusOK, ListResponse[ProductResponse]{
-        Data:       responses,
-        HasMore:    result.HasMore,
-        NextCursor: ptrOrEmpty(result.NextCursor),
-        PrevCursor: ptrOrEmpty(result.PrevCursor),
+        Data:         responses,
+        HasMore:      result.HasMore,
+        NextCursor:   result.NextCursor,
+        BeforeCursor: result.BeforeCursor,
     })
 }
 
 type ListResponse[T any] struct {
-    Data       []T    `json:"data"`
-    HasMore    bool   `json:"has_more"`
-    NextCursor string `json:"next_cursor,omitempty"`
-    PrevCursor string `json:"prev_cursor,omitempty"`
+    Data         []T    `json:"data"`
+    HasMore      bool   `json:"has_more"`
+    NextCursor   string `json:"next_cursor,omitempty"`
+    BeforeCursor string `json:"before_cursor,omitempty"`
 }
 ```
 

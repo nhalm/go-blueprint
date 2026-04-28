@@ -2,6 +2,8 @@
 
 How errors flow from the database through every layer to the HTTP response.
 
+The canonical sentinel set, repository `translateError`, service-layer mapping, and HTTP `handleServiceError` for the Products slice live in [EXAMPLE.md](EXAMPLE.md). This doc explains the chain; EXAMPLE.md is the source of truth for the code. Full chikit `APIError` shape, `Err*` sentinel table, and skimatik `IsXxx` predicate set are in [LIBRARIES.md](LIBRARIES.md).
+
 ## The Chain
 
 ```
@@ -15,7 +17,7 @@ Each layer translates errors into its own vocabulary — the API layer never imp
 
 ## `internal/errors` — Domain Sentinels + ValidationError
 
-Sentinel errors are package-level `var` values compared with `errors.Is`. Because `errors.Is` unwraps the error chain, a service can wrap a sentinel with additional context (`fmt.Errorf("creating product: %w", apierrors.ErrDuplicateName)`) and the API layer's `handleServiceError` will still match it correctly. This means layers can add context without breaking the translation chain.
+Sentinel errors are package-level `var` values compared with `errors.Is`. Because `errors.Is` unwraps the error chain, a service can wrap a sentinel with additional context (`fmt.Errorf("creating product: %w", apperrors.ErrDuplicateName)`) and the API layer's `handleServiceError` will still match it correctly. This means layers can add context without breaking the translation chain.
 
 Sentinels also keep error handling declarative — `handleServiceError` is a single switch rather than string matching or type assertions scattered across handlers. Adding a new error condition means adding one sentinel and one case; nothing else changes.
 
@@ -117,7 +119,7 @@ The service maps repository sentinels to domain sentinels from `internal/errors`
 func (s *ProductService) Get(ctx context.Context, params models.GetProductParams) (models.Product, error) {
     p, err := s.repo.GetByAccountAndID(ctx, params.AccountID, params.ProductID)
     if errors.Is(err, repository.ErrNotFound) {
-        return models.Product{}, apierrors.ErrProductNotFound
+        return models.Product{}, apperrors.ErrProductNotFound
     }
     return p, err
 }
@@ -125,101 +127,51 @@ func (s *ProductService) Get(ctx context.Context, params models.GetProductParams
 
 ## API Layer — Domain → HTTP
 
-One function in `internal/api/errors.go` translates every domain error to an HTTP response. All handlers call it — no switch statements outside this file:
+One function in `internal/api/errors.go` translates every domain error to an HTTP response. All handlers call it — no switch statements outside this file. The full implementation is the canonical Products switch in [EXAMPLE.md](EXAMPLE.md#error-mapping).
 
-```go
-// internal/api/errors.go
-package api
+The translation has three shapes:
 
-import (
-    "errors"
-    "net/http"
-
-    "github.com/nhalm/canonlog"
-    "github.com/nhalm/chikit"
-    apierrors "github.com/yourorg/myapp/internal/errors"
-)
-
-func handleServiceError(r *http.Request, err error) {
-    // Structured validation errors carry per-field details.
-    var validationErr *apierrors.ValidationError
-    if errors.As(err, &validationErr) {
-        fields := make([]chikit.FieldError, len(validationErr.Fields))
-        for i, f := range validationErr.Fields {
-            fields[i] = chikit.FieldError{Param: f.Field, Code: f.Code, Message: f.Message}
-        }
-        chikit.SetError(r, chikit.NewValidationError(fields))
-        return
-    }
-
-    switch {
-    // Client errors — message is safe to show the caller.
-    case errors.Is(err, apierrors.ErrProductNotFound):
-        chikit.SetError(r, chikit.ErrNotFound.With("Product not found"))
-    case errors.Is(err, apierrors.ErrDuplicateName):
-        chikit.SetError(r, chikit.ErrConflict.With("Product with that name already exists"))
-    case errors.Is(err, apierrors.ErrForbidden):
-        chikit.SetError(r, chikit.ErrForbidden.With("Operation not permitted"))
-    case errors.Is(err, apierrors.ErrInvalidInput):
-        chikit.SetError(r, chikit.ErrBadRequest.With("Invalid input"))
-
-    // Server errors — log full detail, return a generic response.
-    case errors.Is(err, apierrors.ErrDatabaseFailed),
-        errors.Is(err, apierrors.ErrEncryptionFailed),
-        errors.Is(err, apierrors.ErrDependencyFailed):
-        canonlog.ErrorAdd(r.Context(), err)
-        chikit.SetError(r, chikit.ErrInternal)
-
-    // Custom status codes.
-    case errors.Is(err, apierrors.ErrServiceUnavailable):
-        canonlog.ErrorAdd(r.Context(), err)
-        chikit.SetError(r, &chikit.APIError{
-            Type:    "internal_error",
-            Code:    "service_unavailable",
-            Message: "Service temporarily unavailable",
-            Status:  http.StatusServiceUnavailable,
-        })
-
-    // Unknown — always log the detail, never leak it.
-    default:
-        canonlog.ErrorAdd(r.Context(), err)
-        chikit.SetError(r, chikit.ErrInternal)
-    }
-}
-```
+- **Structured validation errors** (`*apperrors.ValidationError`) → `chikit.NewValidationError([]chikit.FieldError{...})`. Each `FieldError` carries `Param` / `Code` / `Message`, surfacing per-field detail to the client.
+- **Client-facing sentinels** (`apperrors.ErrProductNotFound`, `ErrDuplicateName`, `ErrForbidden`, `ErrInvalidInput`) → `chikit.ErrXxx.With("user-safe message")`. Status comes from the chikit sentinel.
+- **Server-error sentinels** (`apperrors.ErrDatabaseFailed`, `ErrEncryptionFailed`, `ErrDependencyFailed`, default) → `canonlog.ErrorAdd(r.Context(), err)` to log the real cause, then `chikit.ErrInternal` to return a generic 500 to the client.
+- **Custom statuses** (`apperrors.ErrServiceUnavailable` → 503) → constructed `&chikit.APIError{Type, Code, Message, Status}` directly.
 
 Rule of thumb: **client-facing message** → `chikit.SetError(r, chikit.ErrXxx.With(...))`. **Server-side diagnostic** → `canonlog.ErrorAdd(r.Context(), err)` AND a generic `chikit.ErrInternal` to the client. Never leak SQL, stack traces, or provider errors to the response body.
 
+Adding a new error case means adding one sentinel in `internal/errors/errors.go` and one case in EXAMPLE.md's `handleServiceError` switch — no other files change.
+
 ## Wire Format
 
-`chikit.SetError` emits a consistent JSON shape:
+`chikit.SetError` emits a consistent JSON shape — single envelope `{"error": {...}}` wrapping `chikit.APIError`:
 
 ```json
 {
   "error": {
-    "type":    "invalid_request_error",
-    "code":    "validation_error",
+    "type":    "request_error",
+    "code":    "bad_request",
     "message": "name is required",
     "param":   "name"
   }
 }
 ```
 
-Multi-field validation errors use a `fields` array instead of `param`:
+Multi-field validation errors use an `errors` array instead of `param` (each entry has `param`/`code`/`message`):
 
 ```json
 {
   "error": {
-    "type":    "invalid_request_error",
-    "code":    "validation_error",
-    "message": "validation failed",
-    "fields": [
-      { "field": "name",        "code": "required", "message": "name is required" },
-      { "field": "description", "code": "max",      "message": "description must be at most 1000 characters" }
+    "type":    "validation_error",
+    "code":    "invalid_request",
+    "message": "Validation failed",
+    "errors": [
+      { "param": "name",        "code": "required", "message": "name is required" },
+      { "param": "description", "code": "max",      "message": "description must be at most 1000 characters" }
     ]
   }
 }
 ```
+
+`type` and `code` come from the sentinel chosen — see [LIBRARIES.md](LIBRARIES.md#sentinels) for the full table.
 
 ## Validation — Which Layer Owns What
 
