@@ -1,0 +1,62 @@
+name: Validate Templates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Verify templates/.golangci.yml parses under the version of golangci-lint
+  # that consumers will install. Catches schema migrations like the v1 → v2
+  # change that silently broke configs in the field.
+  golangci-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+      - name: Verify config
+        run: golangci-lint config verify -c templates/.golangci.yml
+
+  # Lint both the repo-level workflows and the consumer-facing CI template.
+  # actionlint catches GitHub Actions-specific issues (bad expressions, unknown
+  # event types, shellcheck inside `run:` blocks, etc.) that plain YAML
+  # validators miss.
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+      - name: Run actionlint
+        run: actionlint -color .github/workflows/*.yml templates/.github/workflows/*.yml
+
+  # `make -n` does a dry run — parses the Makefile and prints what it would
+  # execute, without running anything. Catches typos / syntax errors before
+  # they hit a consumer's bootstrap.
+  makefile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Makefile parses
+        run: make -C templates -n help
+
+  # Markdown cross-doc links: `[X](DATABASE.md#section)` and friends. We run
+  # in --offline mode so external URL rot doesn't gate merges; the value here
+  # is catching renamed sections / moved files.
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lychee link check
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --no-progress --include-fragments '**/*.md'
+          fail: true
