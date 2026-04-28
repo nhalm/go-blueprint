@@ -1,10 +1,9 @@
 # blueprint-vet — Conformance Checker
 
-**Status:** initial implementation in tree at [`blueprint-vet/`](../blueprint-vet/); pending extraction to `github.com/nhalm/blueprint-vet`
+**Status:** [v0.1.0 published](https://github.com/nhalm/blueprint-vet/releases/tag/v0.1.0) at [github.com/nhalm/blueprint-vet](https://github.com/nhalm/blueprint-vet)
 **Owner:** Nick Halm
-**Decision required before extraction:** confirm final repo name (proposal recommends `blueprint-vet`), license (likely MIT), `v0.x` cadence
 
-A design document for a Go static analysis tool that enforces blueprint conformance. The current implementation lives at [`blueprint-vet/`](../blueprint-vet/) in this repo and will move to its own module once the rule set settles.
+A design document for a Go static analysis tool that enforces blueprint conformance. Implementation lives at [github.com/nhalm/blueprint-vet](https://github.com/nhalm/blueprint-vet); this doc records the rule rationale and design decisions.
 
 ## Implementation Status
 
@@ -12,10 +11,10 @@ A design document for a Go static analysis tool that enforces blueprint conforma
 |-----------------|-------|
 | Step 1 — `golangci-lint` config additions (LC-1, LC-2) | Done — see [`templates/.golangci.yml`](../templates/.golangci.yml). LC-3 (layer direction) was reshaped into R-11 instead of shipping as `depguard` — see "Why R-11 absorbed LC-3" below. |
 | Step 2 — repo skeleton + first analyzer (`nowriteheader`) | Done. |
-| Step 3 — remaining Go analyzers (R-2 through R-8, plus R-11) | Done — 9 analyzers wired into `cmd/blueprint-vet`'s multichecker. |
+| Step 3 — remaining Go analyzers (R-2 through R-8, plus R-11, R-12) | Done — 10 analyzers wired into `cmd/blueprint-vet`'s multichecker. |
 | Step 4 — `blueprint-sql-check` binary + R-9 + R-10 | Done — second binary at `cmd/blueprint-sql-check`. |
-| Step 5 — `templates/Makefile`, CI workflow, `lefthook.yml` integration | Pending extraction (Makefile references `github.com/nhalm/blueprint-vet@latest` which doesn't resolve until the repo is published). |
-| Step 6 — live consumer test | Pending extraction. |
+| Step 5 — `templates/Makefile`, CI workflow, `lefthook.yml` integration | Done in [#5](https://github.com/nhalm/go-blueprint/pull/5). |
+| Step 6 — live consumer test | Pending. |
 
 ### Why R-11 absorbed LC-3
 
