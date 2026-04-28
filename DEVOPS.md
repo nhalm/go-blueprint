@@ -62,7 +62,7 @@ Layer-direction enforcement (`internal/models` cannot import upward; `internal/a
 
 ## Conformance Checks — blueprint-vet
 
-[`github.com/nhalm/blueprint-vet`](https://github.com/nhalm/blueprint-vet) is a multichecker plus SQL-file checker that enforces blueprint patterns mechanically. Both binaries are installed by `make install-tools` and run via `make verify`. Rule rationale and the full rule list live in [`proposals/blueprint-vet.md`](proposals/blueprint-vet.md).
+[`github.com/nhalm/blueprint-vet`](https://github.com/nhalm/blueprint-vet) is a multichecker plus SQL-file checker that enforces blueprint patterns mechanically. Both binaries are installed by `make install-tools` and run via `make verify`. Rule rationale and the full rule list live in the [blueprint-vet repo](https://github.com/nhalm/blueprint-vet).
 
 ```bash
 make verify           # runs blueprint-vet ./... + blueprint-sql-check ./internal/repository/queries

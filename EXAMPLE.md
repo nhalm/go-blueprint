@@ -21,9 +21,16 @@ For surrounding context — middleware stack ([API.md](API.md)), error chain exp
 
 ## Schema
 
-`internal/database/schema.sql` — current schema as one file (used for skimatik introspection and dev reset).
+`internal/database/schema.sql` — current schema as one file (used for skimatik introspection and dev reset). Includes the `accounts` table because Products references it via foreign key.
 
-```sql
+```sql {file=internal/database/schema.sql}
+CREATE TABLE accounts (
+    id            UUID PRIMARY KEY,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at    TIMESTAMPTZ
+);
+
 CREATE TABLE products (
     id            UUID PRIMARY KEY,
     account_id    UUID NOT NULL REFERENCES accounts(id),
@@ -49,9 +56,26 @@ CREATE UNIQUE INDEX idx_products_account_name
 
 ## Migration
 
-`internal/database/migrations/000001_create_products.up.sql`:
+`internal/database/migrations/000001_create_accounts.up.sql`:
 
-```sql
+```sql {file=internal/database/migrations/000001_create_accounts.up.sql}
+CREATE TABLE accounts (
+    id            UUID PRIMARY KEY,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at    TIMESTAMPTZ
+);
+```
+
+`internal/database/migrations/000001_create_accounts.down.sql`:
+
+```sql {file=internal/database/migrations/000001_create_accounts.down.sql}
+DROP TABLE IF EXISTS accounts;
+```
+
+`internal/database/migrations/000002_create_products.up.sql`:
+
+```sql {file=internal/database/migrations/000002_create_products.up.sql}
 CREATE TABLE products (
     id            UUID PRIMARY KEY,
     account_id    UUID NOT NULL REFERENCES accounts(id),
@@ -73,19 +97,19 @@ CREATE UNIQUE INDEX idx_products_account_name
     WHERE deleted_at IS NULL;
 ```
 
-`internal/database/migrations/000001_create_products.down.sql`:
+`internal/database/migrations/000002_create_products.down.sql`:
 
-```sql
+```sql {file=internal/database/migrations/000002_create_products.down.sql}
 DROP TABLE IF EXISTS products;
 ```
 
-The up migration matches `schema.sql` exactly. Adding a future change means writing `000002_*.up.sql` / `.down.sql` and updating `schema.sql` to the post-migration state.
+The up migrations match `schema.sql` cumulatively. Adding a future change means writing `000003_*.up.sql` / `.down.sql` and updating `schema.sql` to the post-migration state.
 
 ## Queries
 
 `internal/repository/queries/products.sql` — custom SQL consumed by skimatik. Each `-- name: …` annotation generates a method on the `*ProductsQueries` struct.
 
-```sql
+```sql {file=internal/repository/queries/products.sql}
 -- name: GetProductByAccountAndID :one
 SELECT id, account_id, name, description, active, metadata, created_at, updated_at
 FROM products
@@ -93,7 +117,9 @@ WHERE account_id = $1
   AND id = $2
   AND deleted_at IS NULL;
 
--- name: ListProductsPaginated :paginated
+-- name: ListProductsByAccount :paginated
+-- param: $1 account_id uuid.UUID
+-- param: $2 active *bool
 SELECT id, account_id, name, description, active, created_at, updated_at
 FROM products
 WHERE account_id = $1
@@ -103,9 +129,9 @@ ORDER BY id ASC;
 
 -- name: UpdateProductByAccountAndID :one
 UPDATE products
-SET name        = COALESCE($3, name),
-    description = COALESCE($4, description),
-    active      = COALESCE($5, active),
+SET name        = $3,
+    description = $4,
+    active      = $5,
     updated_at  = NOW()
 WHERE account_id = $1
   AND id          = $2
@@ -127,7 +153,10 @@ WHERE account_id = $1
 
 `internal/models/product.go` — domain types. Internal IDs are `uuid.UUID`; nothing in this package knows about shortuuid.
 
-```go
+```go {file=internal/models/product.go}
+// Package models defines the domain entities and request/response input types
+// shared across the repository, service, and api layers. It imports nothing
+// from internal/* — every other internal package may import models.
 package models
 
 import (
@@ -172,6 +201,18 @@ type UpdateProductRequest struct {
     Active      *bool
 }
 
+// ProductUpdate is the full target state of a product after a partial-update
+// request has been merged with the current persisted state. The repository
+// writes these values directly. Building this from UpdateProductRequest is the
+// service layer's job (read current → apply non-nil fields → write).
+type ProductUpdate struct {
+    AccountID   uuid.UUID
+    ProductID   uuid.UUID
+    Name        string
+    Description *string
+    Active      bool
+}
+
 type DeleteProductParams struct {
     AccountID uuid.UUID
     ProductID uuid.UUID
@@ -194,13 +235,16 @@ type ListProductsResult struct {
 }
 ```
 
-`*string` / `*bool` on `UpdateProductRequest` mark fields as optional for partial updates — the SQL uses `COALESCE` to leave unset fields unchanged. Cursors are **opaque base64-encoded JSON tokens emitted by skimatik** — the handler passes them through unchanged. They are not IDs and are not shortuuid-encoded; field names match `generated.PaginationParams` / `PaginationResult` to avoid translation churn at the repo boundary.
+`*string` / `*bool` on `UpdateProductRequest` mark fields as optional for partial updates. The service layer reads the current product, merges non-nil fields, and writes the full state via `models.ProductUpdate` — keeping the SQL plain (`SET col = $N`) so skimatik's parameter inference works (it can't see parameters wrapped in `COALESCE` / `CASE` inside the SET clause). Cursors are **opaque base64-encoded JSON tokens emitted by skimatik** — the handler passes them through unchanged. They are not IDs and are not shortuuid-encoded; field names match `generated.PaginationParams` / `PaginationResult` to avoid translation churn at the repo boundary.
 
 ## Errors
 
 `internal/errors/errors.go` — domain sentinels and structured `ValidationError`. Compared with `errors.Is` / `errors.As` upstream.
 
-```go
+```go {file=internal/errors/errors.go}
+// Package errors holds the domain sentinel errors and the structured
+// ValidationError used across the codebase. Imported as `apperrors` to avoid
+// colliding with the stdlib `errors` package.
 package errors
 
 import "errors"
@@ -242,9 +286,12 @@ The package is imported across the codebase as `apperrors` (the natural name `er
 
 ## Repository
 
-`internal/repository/product_repository.go` — embeds skimatik's generated CRUD and custom-query structs, exposes domain-shaped methods that return `models.X` values. Every call goes through `executorFromContext(ctx, r.db)` so the same method works inside or outside a transaction.
+`internal/repository/product_repository.go` — embeds skimatik's generated CRUD and custom-query structs, exposes domain-shaped methods that return `models.X` values. Every call passes `executorFromContext(ctx, r.db)` so the same method works inside or outside a transaction.
 
-```go
+```go {file=internal/repository/product_repository.go}
+// Package repository wraps skimatik-generated CRUD and custom-query structs,
+// exposing domain-shaped methods that return models.X values. It owns the
+// repository-layer error sentinels and transaction plumbing.
 package repository
 
 import (
@@ -271,11 +318,10 @@ func NewProductRepository(db *pgxkit.DB) *ProductRepository {
 }
 
 func (r *ProductRepository) Create(ctx context.Context, req models.CreateProductRequest) (models.Product, error) {
-    row, err := r.CreateProducts(ctx, executorFromContext(ctx, r.db), generated.CreateProductsParams{
+    row, err := r.ProductsRepository.Create(ctx, executorFromContext(ctx, r.db), generated.CreateProductsParams{
         AccountId:   req.AccountID,
         Name:        req.Name,
         Description: req.Description,
-        Active:      req.Active,
     })
     if err != nil {
         return models.Product{}, translateError(err)
@@ -284,36 +330,46 @@ func (r *ProductRepository) Create(ctx context.Context, req models.CreateProduct
 }
 
 func (r *ProductRepository) GetByID(ctx context.Context, params models.GetProductParams) (models.Product, error) {
-    row, err := r.GetProductByAccountAndID(ctx, executorFromContext(ctx, r.db), params.AccountID, params.ProductID)
+    row, err := r.ProductsQueries.GetProductByAccountAndID(ctx, executorFromContext(ctx, r.db), params.AccountID, params.ProductID)
     if err != nil {
         return models.Product{}, translateError(err)
     }
-    return toProductModel(row), nil
+    return models.Product{
+        ID:          row.Id,
+        AccountID:   row.AccountId,
+        Name:        row.Name,
+        Description: row.Description,
+        Active:      row.Active,
+        CreatedAt:   row.CreatedAt,
+        UpdatedAt:   row.UpdatedAt,
+    }, nil
 }
 
-func (r *ProductRepository) Update(ctx context.Context, req models.UpdateProductRequest) (models.Product, error) {
-    row, err := r.UpdateProductByAccountAndID(ctx, executorFromContext(ctx, r.db), generated.UpdateProductByAccountAndIDParams{
-        AccountId:   req.AccountID,
-        Id:          req.ProductID,
-        Name:        req.Name,
-        Description: req.Description,
-        Active:      req.Active,
-    })
+func (r *ProductRepository) Update(ctx context.Context, upd models.ProductUpdate) (models.Product, error) {
+    row, err := r.ProductsQueries.UpdateProductByAccountAndID(ctx, executorFromContext(ctx, r.db), upd.AccountID, upd.ProductID, upd.Name, upd.Description, upd.Active)
     if err != nil {
         return models.Product{}, translateError(err)
     }
-    return toProductModel(row), nil
+    return models.Product{
+        ID:          row.Id,
+        AccountID:   row.AccountId,
+        Name:        row.Name,
+        Description: row.Description,
+        Active:      row.Active,
+        CreatedAt:   row.CreatedAt,
+        UpdatedAt:   row.UpdatedAt,
+    }, nil
 }
 
 func (r *ProductRepository) Delete(ctx context.Context, params models.DeleteProductParams) error {
-    if err := r.SoftDeleteProduct(ctx, executorFromContext(ctx, r.db), params.AccountID, params.ProductID); err != nil {
+    if err := r.ProductsQueries.SoftDeleteProduct(ctx, executorFromContext(ctx, r.db), params.AccountID, params.ProductID); err != nil {
         return translateError(err)
     }
     return nil
 }
 
 func (r *ProductRepository) ListWithFilters(ctx context.Context, filter models.ListProductsFilter) (models.ListProductsResult, error) {
-    page, err := r.ListProductsPaginated(
+    page, err := r.ProductsQueries.ListProductsByAccountPaginated(
         ctx,
         executorFromContext(ctx, r.db),
         filter.AccountID,
@@ -329,7 +385,16 @@ func (r *ProductRepository) ListWithFilters(ctx context.Context, filter models.L
     }
     products := make([]models.Product, len(page.Items))
     for i := range page.Items {
-        products[i] = toProductModel(&page.Items[i])
+        item := page.Items[i]
+        products[i] = models.Product{
+            ID:          item.Id,
+            AccountID:   item.AccountId,
+            Name:        item.Name,
+            Description: item.Description,
+            Active:      item.Active,
+            CreatedAt:   item.CreatedAt,
+            UpdatedAt:   item.UpdatedAt,
+        }
     }
     return models.ListProductsResult{
         Products:     products,
@@ -359,7 +424,7 @@ func toProductModel(p *generated.Products) models.Product {
 
 `internal/service/repository_interface.go` — what `ProductService` consumes from the repository layer. The `mockgen` directive lives at the top of this file; running `go generate ./...` produces `repository_interface_mock.go` in the same package.
 
-```go
+```go {file=internal/service/repository_interface.go}
 //go:generate mockgen -source=repository_interface.go -destination=repository_interface_mock.go -package=service
 
 package service
@@ -373,7 +438,7 @@ import (
 type ProductRepository interface {
     Create(ctx context.Context, req models.CreateProductRequest) (models.Product, error)
     GetByID(ctx context.Context, params models.GetProductParams) (models.Product, error)
-    Update(ctx context.Context, req models.UpdateProductRequest) (models.Product, error)
+    Update(ctx context.Context, upd models.ProductUpdate) (models.Product, error)
     Delete(ctx context.Context, params models.DeleteProductParams) error
     ListWithFilters(ctx context.Context, filter models.ListProductsFilter) (models.ListProductsResult, error)
 }
@@ -383,7 +448,11 @@ type ProductRepository interface {
 
 `internal/service/product_service.go` — business logic. Translates repository sentinels to domain sentinels; clamps the pagination limit. The constructor takes only what it uses.
 
-```go
+```go {file=internal/service/product_service.go}
+// Package service holds business logic. It depends on consumer-owned
+// repository interfaces (see repository_interface.go), translates repository
+// sentinels into domain sentinels, and is the layer that orchestrates
+// cross-resource operations.
 package service
 
 import (
@@ -426,7 +495,35 @@ func (s *ProductService) GetProduct(ctx context.Context, params models.GetProduc
 }
 
 func (s *ProductService) UpdateProduct(ctx context.Context, req models.UpdateProductRequest) (models.Product, error) {
-    product, err := s.repo.Update(ctx, req)
+    current, err := s.repo.GetByID(ctx, models.GetProductParams{
+        AccountID: req.AccountID,
+        ProductID: req.ProductID,
+    })
+    if errors.Is(err, repository.ErrNotFound) {
+        return models.Product{}, apperrors.ErrProductNotFound
+    }
+    if err != nil {
+        return models.Product{}, err
+    }
+
+    upd := models.ProductUpdate{
+        AccountID:   req.AccountID,
+        ProductID:   req.ProductID,
+        Name:        current.Name,
+        Description: current.Description,
+        Active:      current.Active,
+    }
+    if req.Name != nil {
+        upd.Name = *req.Name
+    }
+    if req.Description != nil {
+        upd.Description = req.Description
+    }
+    if req.Active != nil {
+        upd.Active = *req.Active
+    }
+
+    product, err := s.repo.Update(ctx, upd)
     switch {
     case errors.Is(err, repository.ErrNotFound):
         return models.Product{}, apperrors.ErrProductNotFound
@@ -467,7 +564,7 @@ func (s *ProductService) ListProducts(ctx context.Context, filter models.ListPro
 
 `internal/api/service_interface.go` — what handlers consume from the service layer. Mirrors the public `*ProductService` method set. Generates `service_interface_mock.go`.
 
-```go
+```go {file=internal/api/service_interface.go}
 //go:generate mockgen -source=service_interface.go -destination=service_interface_mock.go -package=api
 
 package api
@@ -491,7 +588,7 @@ type ProductServiceInterface interface {
 
 `internal/api/products.go` — request types (with validation tags), response types, converter functions, and the five HTTP handlers. IDs cross the wire as prefixed shortuuid strings; this file is the only place encoding/decoding happens.
 
-```go
+```go {file=internal/api/products.go}
 package api
 
 import (
@@ -780,7 +877,7 @@ The full middleware stack — `chikit.Handler` with canonlog, real-IP, header ex
 
 `internal/api/errors.go` — single switch translating domain errors to HTTP responses. Every handler calls `handleServiceError(r, err)`; no other file in `api/` does the translation.
 
-```go
+```go {file=internal/api/errors.go}
 package api
 
 import (

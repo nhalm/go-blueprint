@@ -41,6 +41,10 @@ linters:
         - unlambda
         - whyNoLint
         - unnamedResult
+        # hugeParam fights ARCHITECTURE.md's "pass values across layer
+        # boundaries, not pointers" rule — domain types like models.Product
+        # and config.Config are intentionally passed by value.
+        - hugeParam
     revive:
       rules:
         - name: blank-imports
@@ -62,10 +66,13 @@ linters:
         - name: errorf
         - name: empty-block
         - name: superfluous-else
-        - name: unused-parameter
         - name: unreachable-code
         - name: redefines-builtin-id
         - name: use-any
+        # unused-parameter is disabled — cobra RunE and chi handler signatures
+        # commonly include params (cmd, args, w) that the body doesn't reference,
+        # but renaming them to `_` loses the type-name documentation that helps
+        # readers identify the function's role.
     gocyclo:
       min-complexity: 15
     unparam:

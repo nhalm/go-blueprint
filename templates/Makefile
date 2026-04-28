@@ -30,9 +30,9 @@ setup: install-tools generate
 	@echo "Setup complete! Run 'make run' to start."
 
 install-tools:
-	@go install github.com/nhalm/skimatik/cmd/skimatik@latest
+	@go install github.com/nhalm/skimatik/v2/cmd/skimatik@latest
 	@go install github.com/swaggo/swag/cmd/swag@latest
-	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 	@go install go.uber.org/mock/mockgen@latest
 	@go install golang.org/x/tools/cmd/goimports@latest
 	@go install github.com/evilmartians/lefthook@latest
@@ -40,10 +40,10 @@ install-tools:
 	@go install github.com/nhalm/blueprint-vet/cmd/blueprint-sql-check@latest
 
 build:
-	@go build -o bin/myapp cmd/myapp/main.go
+	@go build -o bin/myapp ./cmd/myapp
 
 run:
-	@go run cmd/myapp/main.go serve
+	@go run ./cmd/myapp serve
 
 test:
 	@go test -v -short ./...
@@ -71,7 +71,7 @@ test-db-down:
 	@docker rm -f $(TEST_DB_CONTAINER) 2>/dev/null || true
 
 test-db-migrate:
-	@DATABASE_URL="$(TEST_DATABASE_URL)" go run cmd/myapp/main.go migrate up
+	@DATABASE_URL="$(TEST_DATABASE_URL)" go run ./cmd/myapp migrate up
 
 fmt:
 	@goimports -w .
@@ -80,7 +80,7 @@ lint:
 	@golangci-lint run
 
 verify:
-	@blueprint-vet ./...
+	@blueprint-vet $$(go list ./... | grep -v /repository/generated)
 	@blueprint-sql-check ./internal/repository/queries
 
 clean:
@@ -97,14 +97,14 @@ db-down:
 	@docker compose down
 
 migrate-up: db-up
-	@go run cmd/myapp/main.go migrate up
+	@go run ./cmd/myapp migrate up
 
 migrate-down:
-	@go run cmd/myapp/main.go migrate down
+	@go run ./cmd/myapp migrate down
 
 generate: migrate-up
 	@skimatik generate
 	@go generate ./...
 
 swagger:
-	@swag init -g cmd/myapp/main.go -o docs
+	@swag init -g ./cmd/myapp/main.go -o docs

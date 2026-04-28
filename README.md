@@ -22,7 +22,8 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 | [TESTING.md](TESTING.md) | Layer strategy, gomock + testify, `pgxkit.RequireDB`, mounting chikit middleware in handler tests, Makefile targets |
 | [DEVOPS.md](DEVOPS.md) | Docker Compose, Makefile, GitHub Actions CI, `.env` vars, golangci-lint config |
 | `templates/` | Copy-ready non-code scaffolding: `Makefile`, `docker-compose.yml`, `skimatik.yaml`, `.golangci.yml`, `.github/workflows/ci.yml`, `.env.example`, `.gitignore` |
-| [`proposals/`](proposals/) | Design docs for tooling that complements the blueprint. See [`blueprint-vet.md`](proposals/blueprint-vet.md) — a static analyzer that mechanically enforces blueprint conformance (handler response writing, repository executor routing, model ID typing, soft-delete defaults). |
+
+> **For agents using this repo as a reference:** the canonical patterns to copy are the topic docs above plus everything under `templates/`. The top-level `Makefile`, `go.mod`, `scripts/`, `examples/_smoke-fixtures/`, and `.github/workflows/template-smoke*.yml` are blueprint-maintainer infrastructure (the smoke test that verifies the docs stay executable) — ignore them when bootstrapping a new service.
 
 ## Core Packages
 

@@ -65,7 +65,7 @@ func NewValidationError(fields ...FieldError) *ValidationError { return &Validat
 
 skimatik generates predicate helpers for every Postgres error category. The `translateError` function in the repository package converts them to repository-level sentinels:
 
-```go
+```go {file=internal/repository/errors.go}
 // internal/repository/errors.go
 package repository
 

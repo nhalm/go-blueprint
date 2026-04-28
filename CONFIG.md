@@ -15,14 +15,18 @@ Error handling patterns (apperrors sentinels, `chikit.SetError`, when to `canonl
 
 One flat struct, populated by composable group loaders:
 
-```go
-// internal/config/config.go
+```go {file=internal/config/config.go}
+// Package config holds the flat Config struct plus group loaders
+// (LoadLogging, LoadDatabase, LoadHTTP, LoadRedis) that each command's RunE
+// composes. Validation, defaults, and cross-field constraints live here, not
+// in handlers or services.
 package config
 
 import (
     "encoding/hex"
     "errors"
     "fmt"
+    "io/fs"
     "slices"
     "time"
 
@@ -57,14 +61,18 @@ type Config struct {
 
 Each loader validates and populates its slice of `Config`. `RunE` calls the groups it needs, then reads any command-specific fields inline.
 
-```go
+```go {file=internal/config/config.go}
 func LoadLogging(cfg *Config) error {
     viper.SetConfigFile(".env")
     viper.SetConfigType("env")
     viper.AutomaticEnv()
     if err := viper.ReadInConfig(); err != nil {
+        // Missing .env is fine — environment variables still flow through
+        // AutomaticEnv. ConfigFileNotFoundError is only returned when using
+        // SetConfigName + AddConfigPath; SetConfigFile produces an os
+        // not-exist error instead, so check both.
         var notFound viper.ConfigFileNotFoundError
-        if !errors.As(err, &notFound) {
+        if !errors.As(err, &notFound) && !errors.Is(err, fs.ErrNotExist) {
             return fmt.Errorf("failed to read config file: %w", err)
         }
     }
@@ -144,7 +152,7 @@ func isValidLogFormat(f string) bool { return slices.Contains(validLogFormats, f
 
 ```
 
-For opaque values like encryption keys, put the decode/length check in a helper:
+For opaque values like encryption keys, put the decode/length check in a helper (illustrative — not used by the canonical Products slice; add to your service when you need it):
 
 ```go
 func loadHexKey(envVar string) ([]byte, error) {
@@ -169,26 +177,84 @@ Each `RunE` calls `config.LoadLogging` first — which also initializes viper �
 
 The full canonical implementation lives in [ARCHITECTURE.md](ARCHITECTURE.md#explicit-dependency-injection) — that doc owns the DI pattern, so the `runServe` example sits there alongside the dependency-flow rules it illustrates.
 
-### `migrate up`
+### `migrate`
 
-```go
-// cmd/<app>/migrate.go
+The `migrate` subcommand wraps `golang-migrate/migrate/v4` with the per-command config-loading pattern. Each `RunE` calls `LoadLogging` → `SetupGlobalLogger` → `LoadDatabase`, then drives `m.Up()`, `m.Down()`, or `m.Version()`.
+
+```go {file=cmd/myapp/migrate.go}
+// cmd/myapp/migrate.go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+
+    "github.com/golang-migrate/migrate/v4"
+    _ "github.com/golang-migrate/migrate/v4/database/postgres"
+    _ "github.com/golang-migrate/migrate/v4/source/file"
+    "github.com/nhalm/canonlog"
+    "github.com/spf13/cobra"
+
+    "github.com/yourorg/myapp/internal/config"
+)
+
+var migrateCmd = &cobra.Command{
+    Use:   "migrate",
+    Short: "Run database migrations",
+}
+
+var migrateUpCmd = &cobra.Command{
+    Use:   "up",
+    Short: "Apply all pending migrations",
+    RunE:  runMigrateUp,
+}
+
+var migrateDownCmd = &cobra.Command{
+    Use:   "down",
+    Short: "Roll back the last migration",
+    RunE:  runMigrateDown,
+}
+
+var migrateVersionCmd = &cobra.Command{
+    Use:   "version",
+    Short: "Show current migration version",
+    RunE:  runMigrateVersion,
+}
+
+func init() {
+    migrateCmd.AddCommand(migrateUpCmd)
+    migrateCmd.AddCommand(migrateDownCmd)
+    migrateCmd.AddCommand(migrateVersionCmd)
+}
+
+func loadMigrateConfig(cfg *config.Config) error {
+    if err := config.LoadLogging(cfg); err != nil {
+        return err
+    }
+    canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
+    return config.LoadDatabase(cfg)
+}
+
+func newMigrator(databaseURL string) (*migrate.Migrate, error) {
+    m, err := migrate.New("file://internal/database/migrations", databaseURL)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create migrator: %w", err)
+    }
+    return m, nil
+}
+
 func runMigrateUp(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
 
     var cfg config.Config
-    if err := config.LoadLogging(&cfg); err != nil {
-        return err
-    }
-    canonlog.SetupGlobalLogger(cfg.LogLevel, cfg.LogFormat)
-
-    if err := config.LoadDatabase(&cfg); err != nil {
+    if err := loadMigrateConfig(&cfg); err != nil {
         return err
     }
 
-    m, err := migrate.New("file://internal/database/migrations", cfg.DatabaseURL)
+    m, err := newMigrator(cfg.DatabaseURL)
     if err != nil {
-        return fmt.Errorf("failed to create migrator: %w", err)
+        return err
     }
     defer m.Close()
 
@@ -211,14 +277,75 @@ func runMigrateUp(cmd *cobra.Command, args []string) error {
     fmt.Printf("Migrations applied successfully. Current version: %d\n", version)
     return nil
 }
+
+func runMigrateDown(cmd *cobra.Command, args []string) error {
+    ctx := context.Background()
+
+    var cfg config.Config
+    if err := loadMigrateConfig(&cfg); err != nil {
+        return err
+    }
+
+    m, err := newMigrator(cfg.DatabaseURL)
+    if err != nil {
+        return err
+    }
+    defer m.Close()
+
+    if err := m.Steps(-1); err != nil {
+        if errors.Is(err, migrate.ErrNoChange) {
+            fmt.Println("No migrations to roll back")
+            return nil
+        }
+        return fmt.Errorf("migration down failed: %w", err)
+    }
+
+    version, dirty, _ := m.Version()
+    log := canonlog.New()
+    log.InfoAdd("component", "migrate").InfoAdd("direction", "down").
+        InfoAdd("version", version).InfoAdd("dirty", dirty)
+    log.Flush(ctx)
+    fmt.Printf("Rolled back. Current version: %d\n", version)
+    return nil
+}
+
+func runMigrateVersion(cmd *cobra.Command, args []string) error {
+    var cfg config.Config
+    if err := loadMigrateConfig(&cfg); err != nil {
+        return err
+    }
+
+    m, err := newMigrator(cfg.DatabaseURL)
+    if err != nil {
+        return err
+    }
+    defer m.Close()
+
+    version, dirty, err := m.Version()
+    if err != nil {
+        if errors.Is(err, migrate.ErrNilVersion) {
+            fmt.Println("No migrations applied yet")
+            return nil
+        }
+        return fmt.Errorf("failed to read migration version: %w", err)
+    }
+    fmt.Printf("Current version: %d (dirty=%t)\n", version, dirty)
+    return nil
+}
 ```
 
 ## Viper Wiring — `root.go`
 
 `root.go` is a pure entry point — it registers subcommands and nothing else. Viper setup happens inside each loader, so errors propagate as return values rather than being swallowed in a `cobra.OnInitialize` callback.
 
-```go
-// cmd/<app>/root.go
+```go {file=cmd/myapp/root.go}
+// cmd/myapp/root.go
+package main
+
+import (
+    "github.com/spf13/cobra"
+)
+
 var rootCmd = &cobra.Command{
     Use:   "myapp",
     Short: "My application",
@@ -227,7 +354,6 @@ var rootCmd = &cobra.Command{
 func init() {
     rootCmd.AddCommand(serveCmd)
     rootCmd.AddCommand(migrateCmd)
-    // ... other commands ...
 }
 ```
 

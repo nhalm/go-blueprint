@@ -138,8 +138,58 @@ Running `go generate ./...` produces the `*_interface_mock.go` files. See [TESTI
 
 No DI framework. Each command's `RunE` wires dependencies top-down. Reading `serve.go` should tell you the entire object graph.
 
-```go
-// cmd/<app>/serve.go
+The Cobra entry point is split into four files under `cmd/myapp/`: `main.go` (one-liner), `root.go` (registers subcommands), `serve.go` (this file), and `migrate.go` (covered in [CONFIG.md](CONFIG.md#migrate)).
+
+```go {file=cmd/myapp/main.go}
+// Package main is the myapp service entry point. It does nothing but execute
+// the cobra root command; subcommands (serve, migrate) are registered in
+// root.go.
+package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    if err := rootCmd.Execute(); err != nil {
+        fmt.Fprintln(os.Stderr, err)
+        os.Exit(1)
+    }
+}
+```
+
+```go {file=cmd/myapp/serve.go}
+// cmd/myapp/serve.go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "net/http"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+
+    "github.com/nhalm/canonlog"
+    "github.com/nhalm/chikit/store"
+    "github.com/nhalm/pgxkit/v2"
+    "github.com/spf13/cobra"
+
+    "github.com/yourorg/myapp/internal/api"
+    "github.com/yourorg/myapp/internal/config"
+    "github.com/yourorg/myapp/internal/repository"
+    "github.com/yourorg/myapp/internal/service"
+)
+
+var serveCmd = &cobra.Command{
+    Use:   "serve",
+    Short: "Run the HTTP server",
+    RunE:  runServe,
+}
+
 func runServe(cmd *cobra.Command, args []string) error {
     ctx := context.Background()
 

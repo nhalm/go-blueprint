@@ -190,7 +190,7 @@ Because IDs are application-generated, the `UUID PRIMARY KEY` column in the sche
 
 Services that need to span multiple repositories in one transaction use a `TxManager`:
 
-```go
+```go {file=internal/repository/tx.go}
 // internal/repository/tx.go
 package repository
 
@@ -286,7 +286,7 @@ myapp migrate down     # rollback one
 myapp migrate version  # show current version + dirty flag
 ```
 
-The full canonical `runMigrateUp` implementation is in [CONFIG.md](CONFIG.md#migrate-up) — that doc owns the per-command-config pattern this command illustrates. Two notes that belong here on the database side:
+The full canonical `runMigrateUp` implementation is in [CONFIG.md](CONFIG.md#migrate) — that doc owns the per-command-config pattern this command illustrates. Two notes that belong here on the database side:
 
 **Dual output.** The command emits both a structured `canonlog` event (for Datadog) and a plain `fmt.Printf` line (for the operator watching the terminal). Both are correct — see the [CONFIG.md logging note](CONFIG.md#logging-during-cli-commands).
 
