@@ -1,10 +1,25 @@
 # blueprint-vet — Conformance Checker
 
-**Status:** design draft, not started
-**Owner:** TBD
-**Decision required before building:** repo location (Option A vs B in Architecture), final rule list
+**Status:** initial implementation in tree at [`blueprint-vet/`](../blueprint-vet/); pending extraction to `github.com/nhalm/blueprint-vet`
+**Owner:** Nick Halm
+**Decision required before extraction:** confirm final repo name (proposal recommends `blueprint-vet`), license (likely MIT), `v0.x` cadence
 
-A design document for a Go static analysis tool that enforces blueprint conformance. Written so that this conversation's context is recoverable months from now without scrolling back.
+A design document for a Go static analysis tool that enforces blueprint conformance. The current implementation lives at [`blueprint-vet/`](../blueprint-vet/) in this repo and will move to its own module once the rule set settles.
+
+## Implementation Status
+
+| Build-plan step | State |
+|-----------------|-------|
+| Step 1 — `golangci-lint` config additions (LC-1, LC-2) | Done — see [`templates/.golangci.yml`](../templates/.golangci.yml). LC-3 (layer direction) was reshaped into R-11 instead of shipping as `depguard` — see "Why R-11 absorbed LC-3" below. |
+| Step 2 — repo skeleton + first analyzer (`nowriteheader`) | Done. |
+| Step 3 — remaining Go analyzers (R-2 through R-8, plus R-11) | Done — 9 analyzers wired into `cmd/blueprint-vet`'s multichecker. |
+| Step 4 — `blueprint-sql-check` binary + R-9 + R-10 | Done — second binary at `cmd/blueprint-sql-check`. |
+| Step 5 — `templates/Makefile`, CI workflow, `lefthook.yml` integration | Pending extraction (Makefile references `github.com/nhalm/blueprint-vet@latest` which doesn't resolve until the repo is published). |
+| Step 6 — live consumer test | Pending extraction. |
+
+### Why R-11 absorbed LC-3
+
+LC-3 was originally specced as a `depguard` config block. Implementation surfaced that `depguard.pkg` is a **prefix match, not a glob** — so the rule has to spell out concrete module paths (e.g. `myapp/internal/repository`), forcing consumers to either rename `myapp` via `sed` at copy time or hand-edit the YAML. Researching how Google and Uber solve the same problem (Bazel `visibility`) confirmed there is no off-the-shelf module-path-agnostic answer for plain `go build` projects. Since the analyzer infrastructure was already standing, LC-3 became R-11 (`layerdirection`) — same enforcement, no module rename, no third-party tool.
 
 ## TL;DR
 
@@ -594,13 +609,11 @@ That's it. Updating to a new rule version is `go install ...@latest`. Pinning is
 
 ## Pending Blueprint Doc Changes
 
-These should land *with* (or just before) `blueprint-vet` to keep docs and tool aligned.
+1. ~~**DATABASE.md** — soften the soft-delete prose.~~ Already in place at DATABASE.md:35 with all four opt-out conventions documented; the proposal's reference was stale.
 
-1. **DATABASE.md** — soften the soft-delete prose. Currently DATABASE.md:33 says "Filter `WHERE deleted_at IS NULL` in **every** read query." Replace with: "Read queries default to filtering `WHERE deleted_at IS NULL`. Queries that intentionally include soft-deleted rows are named to make that explicit (`*IncludingDeleted`, `*Audit`, `*Trash`, `*AllVersions`). The `softdelete` rule in `blueprint-vet` enforces this."
+2. ~~**README.md docs table** — add `proposals/` row.~~ Done.
 
-2. **README.md** — add `LIBRARIES.md` and the new `blueprint-vet` references near the docs table footer ("conformance is checked by..."). Optional.
-
-3. **Add `proposals/blueprint-vet.md` (this doc) reference** — link from README.md docs table, or leave standalone in `proposals/` directory.
+3. **Templates integration** (Step 5) — pending extraction. Once `blueprint-vet` lives at `github.com/nhalm/blueprint-vet`, add `go install` lines to `templates/Makefile`'s `install-tools`, a `verify` target, a `verify` step to `templates/.github/workflows/ci.yml` (file does not exist yet), and an optional `verify` job in `templates/lefthook.yml`.
 
 ## Open Questions (Resolve Before Building)
 

@@ -1,4 +1,4 @@
-.PHONY: help setup install-tools build run fmt test test-integration test-db-up test-db-down test-db-migrate lint clean db-up db-down migrate-up migrate-down generate swagger
+.PHONY: help setup install-tools build run fmt test test-integration test-db-up test-db-down test-db-migrate lint verify clean db-up db-down migrate-up migrate-down generate swagger
 
 TEST_DB_PORT      ?= 15432
 TEST_DB_NAME      ?= myapp_test
@@ -19,6 +19,7 @@ help:
 	@echo "  test-db-migrate  - Apply migrations to the test database"
 	@echo "  fmt              - Format code with goimports"
 	@echo "  lint             - Run linter"
+	@echo "  verify           - Run blueprint-vet conformance checks (Go AST + SQL)"
 	@echo "  db-up            - Start development PostgreSQL"
 	@echo "  db-down          - Stop development PostgreSQL"
 	@echo "  migrate-up       - Run migrations against dev DB"
@@ -35,6 +36,8 @@ install-tools:
 	@go install go.uber.org/mock/mockgen@latest
 	@go install golang.org/x/tools/cmd/goimports@latest
 	@go install github.com/evilmartians/lefthook@latest
+	@go install github.com/nhalm/blueprint-vet/cmd/blueprint-vet@latest
+	@go install github.com/nhalm/blueprint-vet/cmd/blueprint-sql-check@latest
 
 build:
 	@go build -o bin/myapp cmd/myapp/main.go
@@ -75,6 +78,10 @@ fmt:
 
 lint:
 	@golangci-lint run
+
+verify:
+	@blueprint-vet ./...
+	@blueprint-sql-check ./internal/repository/queries
 
 clean:
 	@rm -rf bin/

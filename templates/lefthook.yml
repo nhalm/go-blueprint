@@ -7,6 +7,9 @@ pre-commit:
     - name: lint
       run: make lint
 
+    - name: verify
+      run: make verify
+
     - name: test
       run: make test
 
