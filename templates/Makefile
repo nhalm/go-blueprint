@@ -107,4 +107,4 @@ generate: migrate-up
 	@go generate ./...
 
 swagger:
-	@swag init -g ./cmd/myapp/main.go -o internal/api/docs
+	@swag init -g ./cmd/myapp/main.go -o docs

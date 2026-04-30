@@ -70,7 +70,7 @@ make verify           # runs blueprint-vet ./... + blueprint-sql-check ./interna
 
 ## Gitignore
 
-See [`templates/.gitignore`](templates/.gitignore). Generated artifacts are ignored: skimatik output (`internal/repository/generated/`), mockgen output (`*_interface_mock.go`), and swagger output (`internal/api/docs/`). Fresh clones run `make generate` (which needs a live DB) and `make swagger` to materialize them. Compiled binaries land in `bin/` and are ignored too.
+See [`templates/.gitignore`](templates/.gitignore). Generated artifacts are ignored: skimatik output (`internal/repository/generated/`), mockgen output (`*_interface_mock.go`), and swagger output (`docs/`). Fresh clones run `make generate` (which needs a live DB) and `make swagger` to materialize them. Compiled binaries land in `bin/` and are ignored too.
 
 ## Development Workflow
 
