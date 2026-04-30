@@ -463,6 +463,8 @@ Annotate handlers with standard swaggo tags. Generate with:
 make swagger
 ```
 
+Output lands in `docs/` (swag's default) and is gitignored. To serve the spec, blank-import that package (`_ "github.com/yourorg/myapp/docs"`) so `swag`'s init function registers itself.
+
 ```go
 // CreateProduct godoc
 // @Summary     Create a new product
