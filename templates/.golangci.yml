@@ -39,19 +39,6 @@ linters:
       # about pgx so it actually fires on pgx-based iteration code.
       packages:
         - github.com/jackc/pgx/v5
-    staticcheck:
-      # Keep every staticcheck rule (SA bug-class, S simplicity, ST style)
-      # and disable a single quickfix.
-      #
-      # QF1008 ("could remove embedded field from selector") fights the
-      # skimatik wrapper pattern: a hand-written repository embeds the
-      # generated `*XQueries` struct AND adds domain methods. Spelling
-      # `r.XQueries.GetByID(...)` makes clear the call is a generated
-      # passthrough, not a wrapper-defined method. Switching to the
-      # promoted form loses that signal.
-      checks:
-        - all
-        - "-QF1008"
     forbidigo:
       analyze-types: true
       forbid:

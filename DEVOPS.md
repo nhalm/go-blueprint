@@ -25,9 +25,12 @@ Dev Postgres lives on `5432`; the test database uses a separate container on `15
 See [`templates/Makefile`](templates/Makefile). Available targets:
 
 - `setup` — install dev tools + generate
+- `install-tools` — install dev tools without running generate
 - `build` / `run` — build or run the app
 - `test` — unit tests only (`-short`, skips integration)
 - `test-integration` — full suite against a local test container, with `-race -coverprofile`
+- `test-db-up` / `test-db-down` — start / remove the test Postgres container
+- `test-db-migrate` — apply migrations to the test DB
 - `lint` — `go fmt`, the custom-gcl binary (golangci-lint + blueprint-vet plugin), and `blueprint-sql-check`
 - `db-up` / `db-down` — start/stop dev Postgres
 - `migrate-up` / `migrate-down` — run migrations
@@ -55,7 +58,7 @@ See [`templates/.env.example`](templates/.env.example). `DATABASE_URL` is the on
 Two files drive the lint pipeline:
 
 - [`templates/.custom-gcl.yml`](templates/.custom-gcl.yml) pins the golangci-lint version and lists the [blueprint-vet](https://github.com/nhalm/blueprint-vet) plugin. `make lint` runs `golangci-lint custom` against this file and writes `./bin/custom-gcl` — a regular golangci-lint binary with blueprint-vet's analyzers compiled in. The `.custom-gcl.yml` file is the Makefile dep, so the binary rebuilds only when the pin changes.
-- [`templates/.golangci.yml`](templates/.golangci.yml) enables the bug-class linter set (`errcheck`, `errorlint`, `rowserrcheck`, `sqlclosecheck`, `staticcheck`, `unused`, `govet`, `ineffassign`, `misspell`, `unconvert`, `gocyclo`) plus `revive`, `gocritic`, `unparam`, `wastedassign`, `prealloc` for clarity, and `blueprint-vet` as a custom linter.
+- [`templates/.golangci.yml`](templates/.golangci.yml) enables the bug-class linter set (`errcheck`, `errorlint`, `rowserrcheck`, `sqlclosecheck`, `staticcheck`, `unused`, `govet`, `ineffassign`, `misspell`, `unconvert`, `gocyclo`) plus `revive`, `gocritic`, `unparam`, `wastedassign`, `prealloc`, `forbidigo`, and `blueprint-vet` as a custom linter.
 
 `make lint` orchestrates the whole pipeline:
 
@@ -63,12 +66,15 @@ Two files drive the lint pipeline:
 make lint   # go fmt → ./bin/custom-gcl run ./... → blueprint-sql-check ./internal/repository/queries
 ```
 
-Four configuration details are non-obvious and worth surfacing:
+Three configuration details are non-obvious and worth surfacing:
 
 - **`rowserrcheck.packages: [github.com/jackc/pgx/v5]`** — the linter's default packages list only covers `database/sql`, so without this teach it about pgx the linter silently no-ops on every pgx-based iteration in the codebase.
 - **Generated code stays excluded.** `internal/repository/generated` is in `linters.exclusions.paths`. Skimatik regenerates the package on every schema change; lint findings there have nowhere to live. (Some skimatik downstreams lint generated code on equal footing — that's a deliberate, opposite tradeoff.)
 - **`blueprint-vet` plugin replaces the standalone binary path.** The same R-1..R-12 rules surface inside `golangci-lint run` instead of needing a separate `make verify` invocation. `blueprint-sql-check` (the SQL-file checker, not Go AST) still runs as a standalone binary from `make lint` because it operates on `.sql` files outside the golangci-lint pipeline.
-- **staticcheck QF1008 is disabled.** It would rewrite `r.ProductsQueries.GetByID(...)` to `r.GetByID(...)` via Go method promotion. In a skimatik wrapper repo, the explicit `XQueries.` qualifier documents which calls are generated passthroughs vs. domain methods added on the wrapper; the promoted form loses that signal.
+
+### Suppression policy
+
+Applications built from this blueprint do **not** disable lint checks at the config level unless there is a very specific and nuanced reason that a *line of code* — not the whole codebase — needs the exemption. The default move is to fix the warning. When fixing genuinely loses signal, use a `//nolint:<rule> // <one-line rationale>` at the call site so the suppression is local, visible, and reviewable. The blueprint dogfoods this stance — every linter the blueprint enables runs unredacted against the canonical patterns in `EXAMPLE.md`, `ARCHITECTURE.md`, and the rest of the docs. If a check fights a canonical pattern, change the pattern.
 
 Three blueprint-specific gates carry over from the previous config:
 

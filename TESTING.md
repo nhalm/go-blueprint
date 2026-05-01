@@ -91,7 +91,7 @@ For test isolation prefer a rolled-back transaction over per-test TRUNCATE:
 ```go
 tx, err := testDB.BeginTx(ctx, pgx.TxOptions{}) // returns *pgxkit.Tx
 require.NoError(t, err)
-defer tx.Rollback(ctx)  // auto-cleanup; safe even after Commit
+defer func() { _ = tx.Rollback(ctx) }()  // auto-cleanup; safe even after Commit (returns ErrTxDone, discarded)
 
 txCtx := repository.ContextWithTx(ctx, tx)
 // Run operations against txCtx — executorFromContext resolves the tx automatically
@@ -324,7 +324,7 @@ func TestProductRepository_CRUD(t *testing.T) {
     t.Run("Create and Get", func(t *testing.T) {
         tx, err := testDB.BeginTx(ctx, pgx.TxOptions{})
         require.NoError(t, err)
-        defer tx.Rollback(ctx)
+        defer func() { _ = tx.Rollback(ctx) }()
 
         txCtx     := repository.ContextWithTx(ctx, tx)
         accountID := uuid.New()

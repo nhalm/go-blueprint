@@ -330,7 +330,7 @@ func (r *ProductRepository) Create(ctx context.Context, req models.CreateProduct
 }
 
 func (r *ProductRepository) GetByID(ctx context.Context, params models.GetProductParams) (models.Product, error) {
-    row, err := r.ProductsQueries.GetProductByAccountAndID(ctx, executorFromContext(ctx, r.db), params.AccountID, params.ProductID)
+    row, err := r.GetProductByAccountAndID(ctx, executorFromContext(ctx, r.db), params.AccountID, params.ProductID)
     if err != nil {
         return models.Product{}, translateError(err)
     }
@@ -346,7 +346,7 @@ func (r *ProductRepository) GetByID(ctx context.Context, params models.GetProduc
 }
 
 func (r *ProductRepository) Update(ctx context.Context, upd models.ProductUpdate) (models.Product, error) {
-    row, err := r.ProductsQueries.UpdateProductByAccountAndID(ctx, executorFromContext(ctx, r.db), upd.AccountID, upd.ProductID, upd.Name, upd.Description, upd.Active)
+    row, err := r.UpdateProductByAccountAndID(ctx, executorFromContext(ctx, r.db), upd.AccountID, upd.ProductID, upd.Name, upd.Description, upd.Active)
     if err != nil {
         return models.Product{}, translateError(err)
     }
@@ -362,14 +362,14 @@ func (r *ProductRepository) Update(ctx context.Context, upd models.ProductUpdate
 }
 
 func (r *ProductRepository) Delete(ctx context.Context, params models.DeleteProductParams) error {
-    if err := r.ProductsQueries.SoftDeleteProduct(ctx, executorFromContext(ctx, r.db), params.AccountID, params.ProductID); err != nil {
+    if err := r.SoftDeleteProduct(ctx, executorFromContext(ctx, r.db), params.AccountID, params.ProductID); err != nil {
         return translateError(err)
     }
     return nil
 }
 
 func (r *ProductRepository) ListWithFilters(ctx context.Context, filter models.ListProductsFilter) (models.ListProductsResult, error) {
-    page, err := r.ProductsQueries.ListProductsByAccountPaginated(
+    page, err := r.ListProductsByAccountPaginated(
         ctx,
         executorFromContext(ctx, r.db),
         filter.AccountID,
