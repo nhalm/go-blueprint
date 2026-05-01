@@ -91,7 +91,7 @@ For test isolation prefer a rolled-back transaction over per-test TRUNCATE:
 ```go
 tx, err := testDB.BeginTx(ctx, pgx.TxOptions{}) // returns *pgxkit.Tx
 require.NoError(t, err)
-defer tx.Rollback(ctx)  // auto-cleanup; safe even after Commit
+defer func() { _ = tx.Rollback(ctx) }()  // auto-cleanup; safe even after Commit (returns ErrTxDone, discarded)
 
 txCtx := repository.ContextWithTx(ctx, tx)
 // Run operations against txCtx — executorFromContext resolves the tx automatically
@@ -324,7 +324,7 @@ func TestProductRepository_CRUD(t *testing.T) {
     t.Run("Create and Get", func(t *testing.T) {
         tx, err := testDB.BeginTx(ctx, pgx.TxOptions{})
         require.NoError(t, err)
-        defer tx.Rollback(ctx)
+        defer func() { _ = tx.Rollback(ctx) }()
 
         txCtx     := repository.ContextWithTx(ctx, tx)
         accountID := uuid.New()
@@ -428,6 +428,6 @@ make test-db-down       # remove it
 make test-db-migrate    # apply migrations to the test DB
 ```
 
-Run with `-race` when testing concurrent code locally; CI always runs `go test -race ./...`. The `test-integration` Makefile target omits it by default for speed — add it explicitly when you need it.
+`make test-integration` runs `go test -v -race -coverprofile=coverage.txt ./...` so the local target matches what CI runs — no flag drift between environments. `make test` (the unit-only target) skips `-race` for fast inner-loop iteration.
 
 The test DB runs on a dedicated port (default `15432` in the template Makefile) so it doesn't fight with the dev DB on `5432`. Pick a unique port per service if you run several side-by-side.

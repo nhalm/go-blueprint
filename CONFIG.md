@@ -256,7 +256,7 @@ func runMigrateUp(cmd *cobra.Command, args []string) error {
     if err != nil {
         return err
     }
-    defer m.Close()
+    defer func() { _, _ = m.Close() }()
 
     if err := m.Up(); err != nil {
         if errors.Is(err, migrate.ErrNoChange) {
@@ -290,7 +290,7 @@ func runMigrateDown(cmd *cobra.Command, args []string) error {
     if err != nil {
         return err
     }
-    defer m.Close()
+    defer func() { _, _ = m.Close() }()
 
     if err := m.Steps(-1); err != nil {
         if errors.Is(err, migrate.ErrNoChange) {
@@ -319,7 +319,7 @@ func runMigrateVersion(cmd *cobra.Command, args []string) error {
     if err != nil {
         return err
     }
-    defer m.Close()
+    defer func() { _, _ = m.Close() }()
 
     version, dirty, err := m.Version()
     if err != nil {

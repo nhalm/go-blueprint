@@ -1,0 +1,11 @@
+version: v2.11.4
+name: custom-gcl
+destination: ./bin
+plugins:
+  # blueprint-vet ships its analyzers as a golangci-lint Module Plugin so a
+  # single `golangci-lint run` covers handwritten code, generated code, and
+  # blueprint conformance rules. `version: latest` keeps the plugin in step
+  # with upstream releases without a manual pin bump every time.
+  - module: github.com/nhalm/blueprint-vet
+    import: github.com/nhalm/blueprint-vet/plugin
+    version: latest

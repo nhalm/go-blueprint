@@ -17,8 +17,9 @@ extract-docs:
 	    --force
 
 # Full bootstrap smoke test: extract canonical docs, scaffold a complete
-# service, stand up Postgres, run migrations, run skimatik, build, lint, verify
-# (blueprint-vet), and exercise the integration test suite.
+# service, stand up Postgres, run migrations, run skimatik, build, and run
+# `make lint` (gofmt + custom-gcl with the blueprint-vet plugin +
+# blueprint-sql-check) end-to-end against the scaffolded service.
 smoke: extract-docs
 	@cd $(SMOKE_DIR) && \
 	  echo "→ Seeding .env from .env.example…" && \
@@ -43,10 +44,8 @@ smoke: extract-docs
 	  goimports -w . && \
 	  echo "→ go build…" && \
 	  go build ./... && \
-	  echo "→ golangci-lint…" && \
-	  golangci-lint run && \
-	  echo "→ blueprint-vet (via make verify — excludes generated/)…" && \
-	  make verify && \
+	  echo "→ make lint (custom-gcl + blueprint-vet plugin + blueprint-sql-check)…" && \
+	  make lint && \
 	  echo "→ make migrate-up (re-run via cmd/myapp to verify)…" && \
 	  make migrate-up && \
 	  echo "→ Tearing down Postgres…" && \

@@ -35,7 +35,8 @@ jobs:
           # Override the maintainer Makefile's smoke target to bump deps before
           # building. The flow is: extract → seed .env → install tools → up
           # postgres → migrate → skimatik → go get -u → tidy → generate →
-          # build → lint → verify → integration test.
+          # build → lint (custom-gcl + blueprint-vet plugin + blueprint-sql-check)
+          # → integration test.
           make extract-docs
           cd build/smoke
           cp .env.example .env
@@ -54,7 +55,6 @@ jobs:
           goimports -w .
           go build ./...
           make lint
-          make verify
           make test-integration
           docker compose down -v
 

@@ -28,7 +28,7 @@ Every pattern is demonstrated with complete code examples inline in the docs.
 | [DATABASE.md](DATABASE.md) | Schema principles, pgxkit v2 Executor, skimatik config and `.sql` annotations, transactions via context, golang-migrate |
 | [TESTING.md](TESTING.md) | Layer strategy, gomock + testify, `pgxkit.RequireDB`, mounting chikit middleware in handler tests, Makefile targets |
 | [DEVOPS.md](DEVOPS.md) | Docker Compose, Makefile, GitHub Actions CI, `.env` vars, golangci-lint config |
-| `templates/` | Copy-ready non-code scaffolding: `Makefile`, `docker-compose.yml`, `skimatik.yaml`, `.golangci.yml`, `.github/workflows/ci.yml`, `.env.example`, `.gitignore` |
+| `templates/` | Copy-ready non-code scaffolding: `Makefile`, `docker-compose.yml`, `skimatik.yaml`, `.golangci.yml`, `.custom-gcl.yml`, `lefthook.yml`, `.github/workflows/ci.yml`, `.env.example`, `.gitignore` |
 
 > **For agents using this repo as a reference:** the canonical patterns to copy are the topic docs above plus everything under `templates/`. The top-level `Makefile`, `go.mod`, `scripts/`, `examples/_smoke-fixtures/`, and `.github/workflows/template-smoke*.yml` are blueprint-maintainer infrastructure (the smoke test that verifies the docs stay executable) — ignore them when bootstrapping a new service.
 
@@ -133,14 +133,13 @@ mkdir -p cmd/myapp \
          internal/repository/queries
 
 # 3. Pull scaffolding from this blueprint's templates/ dir (Makefile,
-#    docker-compose.yml, skimatik.yaml, .golangci.yml, .github/workflows/ci.yml,
-#    .env.example, .gitignore) and search/replace "myapp" with your app name.
+#    docker-compose.yml, skimatik.yaml, .golangci.yml, .custom-gcl.yml,
+#    lefthook.yml, .github/workflows/ci.yml, .env.example, .gitignore)
+#    and search/replace "myapp" with your app name.
 
-# 4. Install tools
-go install github.com/nhalm/skimatik/cmd/skimatik@latest
-go install github.com/swaggo/swag/cmd/swag@latest
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-go install go.uber.org/mock/mockgen@latest
+# 4. Install tools — `make setup` handles skimatik, swag, mockgen, goimports,
+#    and lefthook. golangci-lint is bootstrapped on demand by `make lint`
+#    (which builds ./bin/custom-gcl from .custom-gcl.yml).
 
 # 5. Write your first migration, schema.sql, one skimatik query file, and
 #    config struct. See DATABASE.md + CONFIG.md.

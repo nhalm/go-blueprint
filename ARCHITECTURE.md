@@ -215,7 +215,7 @@ func runServe(cmd *cobra.Command, args []string) error {
     ); err != nil {
         return fmt.Errorf("failed to connect to database: %w", err)
     }
-    defer db.Shutdown(ctx)
+    defer func() { _ = db.Shutdown(ctx) }()
 
     productRepo := repository.NewProductRepository(db)
     productSvc := service.NewProductService(productRepo)
