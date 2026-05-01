@@ -1,14 +1,8 @@
 pre-commit:
   parallel: true
   jobs:
-    - name: fmt
-      run: make fmt
-
     - name: lint
       run: make lint
-
-    - name: verify
-      run: make verify
 
     - name: test
       run: make test

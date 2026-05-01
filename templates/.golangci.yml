@@ -6,19 +6,39 @@ run:
 linters:
   default: none
   enable:
+    # Bug-class linters — surface real defects, not style preferences.
+    - errcheck
+    - errorlint
     - govet
+    - ineffassign
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
     - unused
     - misspell
+    - unconvert
+    - gocyclo
+    # Blueprint-specific rules. Provided by the blueprint-vet plugin compiled
+    # into ./bin/custom-gcl via .custom-gcl.yml.
+    - blueprint-vet
+    # Project-local guardrails — see settings.forbidigo below.
+    - forbidigo
+    # Style/clarity linters that historically caught real bugs in this stack.
     - gocritic
     - revive
-    - gocyclo
-    - ineffassign
-    - unconvert
     - unparam
     - wastedassign
     - prealloc
-    - forbidigo
   settings:
+    custom:
+      blueprint-vet:
+        type: module
+        description: Blueprint conformance rules (R-1..R-7, R-11, R-12)
+    rowserrcheck:
+      # Default packages list only covers database/sql; teach the linter
+      # about pgx so it actually fires on pgx-based iteration code.
+      packages:
+        - github.com/jackc/pgx/v5
     forbidigo:
       analyze-types: true
       forbid:
@@ -78,8 +98,20 @@ linters:
     unparam:
       check-exported: false
   exclusions:
+    # Generated code stays excluded. skimatik's output is regenerated on
+    # every schema change; lint findings there have nowhere to live.
     paths:
       - internal/repository/generated
+    rules:
+      # Cyclomatic complexity isn't a meaningful signal in test fixtures —
+      # table-driven tests are *supposed* to enumerate many branches.
+      - path: '_test\.go$'
+        linters:
+          - gocyclo
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
 
 formatters:
   enable:

@@ -15,10 +15,12 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+      # Single entry point: same lint Make target developers run locally,
+      # so flags can't drift between CI and dev. `make lint` builds the
+      # custom-gcl binary (golangci-lint + blueprint-vet plugin) on the
+      # first run and reuses it after via the .custom-gcl.yml file dep.
+      - name: Run make lint
+        run: make lint
 
   test:
     runs-on: ubuntu-latest
@@ -54,6 +56,8 @@ jobs:
           DATABASE_URL: postgres://myapp:myapp_test@localhost:5432/myapp_test?sslmode=disable
         run: go run cmd/myapp/main.go migrate up
 
+      # Flags match the `make test-integration` target so local and CI runs
+      # exercise the same code paths.
       - name: Run tests
         env:
           TEST_DATABASE_URL: postgres://myapp:myapp_test@localhost:5432/myapp_test?sslmode=disable
@@ -72,4 +76,4 @@ jobs:
           go-version: '1.25'
           cache: true
       - name: Build
-        run: go build -o bin/myapp cmd/myapp/main.go
+        run: make build

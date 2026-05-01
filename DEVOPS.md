@@ -6,9 +6,9 @@ The [`templates/`](templates/) directory contains copy-ready versions of every c
 
 ## Git Hooks — Lefthook
 
-See [`templates/lefthook.yml`](templates/lefthook.yml). Pre-commit runs `fmt`, `lint`, and `test` in parallel. Pre-push runs `test-integration`.
+See [`templates/lefthook.yml`](templates/lefthook.yml). Pre-commit runs `lint` and `test` in parallel; pre-push runs `test-integration`. `make lint` already covers formatting (`go fmt`), the strict-but-bug-class linter set, and `blueprint-sql-check`, so the hook stays a single target.
 
-`lefthook` is installed by `make install-tools`. After copying the template, activate the hooks once:
+`lefthook` is installed by `make setup`. After copying the template, activate the hooks once:
 
 ```bash
 lefthook install
@@ -24,16 +24,16 @@ Dev Postgres lives on `5432`; the test database uses a separate container on `15
 
 See [`templates/Makefile`](templates/Makefile). Available targets:
 
-- `setup` — install tools + generate
+- `setup` — install dev tools + generate
 - `build` / `run` — build or run the app
 - `test` — unit tests only (`-short`, skips integration)
-- `test-integration` — full suite against a local test container
-- `lint` — golangci-lint
-- `verify` — [`blueprint-vet`](https://github.com/nhalm/blueprint-vet) conformance checks (Go AST analyzers + SQL file rules)
+- `test-integration` — full suite against a local test container, with `-race -coverprofile`
+- `lint` — `go fmt`, the custom-gcl binary (golangci-lint + blueprint-vet plugin), and `blueprint-sql-check`
 - `db-up` / `db-down` — start/stop dev Postgres
 - `migrate-up` / `migrate-down` — run migrations
 - `generate` — skimatik + go generate
 - `swagger` — regenerate OpenAPI docs
+- `clean` — remove build artifacts
 
 **Change the port per service** when running more than one locally. The template defaults to `15432` for the test DB; pick any unused high-range port.
 
@@ -41,31 +41,64 @@ See [`templates/Makefile`](templates/Makefile). Available targets:
 
 See [`templates/.github/workflows/ci.yml`](templates/.github/workflows/ci.yml). A few things to note:
 
+- The lint job is `make lint` — same target developers run locally, no `golangci-lint-action`. Flags can't drift between CI and dev because there's only one definition.
 - `mockgen` is installed in CI because `go generate ./...` invokes it.
 - Migrations run with `DATABASE_URL`; `pgxkit.RequireDB(t)` reads `TEST_DATABASE_URL`. Both point at the same Postgres service — separate env var names make the intent clear.
-- `-race` runs the race detector. `-short` is omitted so integration tests execute against the Postgres service.
+- `-race -coverprofile` matches the `make test-integration` target so the local and CI test runs exercise the same code paths.
 
 ## Environment Variables
 
 See [`templates/.env.example`](templates/.env.example). `DATABASE_URL` is the only unconditionally required env var for `serve`. All other fields have defaults defined in [CONFIG.md](CONFIG.md).
 
-## Golangci-lint Configuration
+## Lint Pipeline — custom-gcl + blueprint-vet plugin
 
-See [`templates/.golangci.yml`](templates/.golangci.yml). `internal/repository/generated` is excluded so skimatik's output doesn't trip the lint.
+Two files drive the lint pipeline:
 
-Two blueprint-specific gates, in addition to the standard linters:
+- [`templates/.custom-gcl.yml`](templates/.custom-gcl.yml) pins the golangci-lint version and lists the [blueprint-vet](https://github.com/nhalm/blueprint-vet) plugin. `make lint` runs `golangci-lint custom` against this file and writes `./bin/custom-gcl` — a regular golangci-lint binary with blueprint-vet's analyzers compiled in. The `.custom-gcl.yml` file is the Makefile dep, so the binary rebuilds only when the pin changes.
+- [`templates/.golangci.yml`](templates/.golangci.yml) enables the bug-class linter set (`errcheck`, `errorlint`, `rowserrcheck`, `sqlclosecheck`, `staticcheck`, `unused`, `govet`, `ineffassign`, `misspell`, `unconvert`, `gocyclo`) plus `revive`, `gocritic`, `unparam`, `wastedassign`, `prealloc` for clarity, and `blueprint-vet` as a custom linter.
 
-- **`forbidigo`: `*pgxkit.DB.Ping`** — `*pgxkit.DB` exposes `HealthCheck` and `IsReady`, not `Ping`. Scoped to `github.com/nhalm/pgxkit/v2` so Redis (which does have `Ping`) is unaffected. Requires `analyze-types: true`.
-- **`forbidigo`: `canonlog.AddRequestFields`** — does not exist; use `canonlog.InfoAdd(ctx, key, value)` or `canonlog.InfoAddMany(ctx, fields)`.
-
-Layer-direction enforcement (`internal/models` cannot import upward; `internal/api` cannot import `repository` directly) lives in the `layerdirection` analyzer in `blueprint-vet`, not here — module-path-agnostic by construction so consumers don't need to rename the rule.
-
-## Conformance Checks — blueprint-vet
-
-[`github.com/nhalm/blueprint-vet`](https://github.com/nhalm/blueprint-vet) is a multichecker plus SQL-file checker that enforces blueprint patterns mechanically. Both binaries are installed by `make install-tools` and run via `make verify`. Rule rationale and the full rule list live in the [blueprint-vet repo](https://github.com/nhalm/blueprint-vet).
+`make lint` orchestrates the whole pipeline:
 
 ```bash
-make verify           # runs blueprint-vet ./... + blueprint-sql-check ./internal/repository/queries
+make lint   # go fmt → ./bin/custom-gcl run ./... → blueprint-sql-check ./internal/repository/queries
+```
+
+Three configuration details are non-obvious and worth surfacing:
+
+- **`rowserrcheck.packages: [github.com/jackc/pgx/v5]`** — the linter's default packages list only covers `database/sql`, so without this teach it about pgx the linter silently no-ops on every pgx-based iteration in the codebase.
+- **Generated code stays excluded.** `internal/repository/generated` is in `linters.exclusions.paths`. Skimatik regenerates the package on every schema change; lint findings there have nowhere to live. (Some skimatik downstreams lint generated code on equal footing — that's a deliberate, opposite tradeoff.)
+- **`blueprint-vet` plugin replaces the standalone binary path.** The same R-1..R-12 rules surface inside `golangci-lint run` instead of needing a separate `make verify` invocation. `blueprint-sql-check` (the SQL-file checker, not Go AST) still runs as a standalone binary from `make lint` because it operates on `.sql` files outside the golangci-lint pipeline.
+
+Three blueprint-specific gates carry over from the previous config:
+
+- **`forbidigo`: `*pgxkit.DB.Ping`** — `*pgxkit.DB` exposes `HealthCheck` and `IsReady`, not `Ping`. Scoped to `github.com/nhalm/pgxkit/v2` so Redis (which does have `Ping`) is unaffected. Requires `analyze-types: true`.
+- **`forbidigo`: `canonlog.AddRequestFields`** — use `canonlog.InfoAdd(ctx, key, value)` or `canonlog.InfoAddMany(ctx, fields)`.
+- **`revive use-any`** — enforce `any` over `interface{}` for the empty interface.
+
+Layer-direction enforcement (`internal/models` cannot import upward; `internal/api` cannot import `repository` directly) lives in the `layerdirection` analyzer inside the blueprint-vet plugin — module-path-agnostic by construction, so consumers don't need to rename the rule.
+
+### Errcheck patterns
+
+`errcheck` is enabled and surfaces real bugs. The patterns that come up most often:
+
+- **HTTP handlers** route encode failures through a `writeJSON(w, status, v)` helper that logs via canonlog.
+- **`defer tx.Rollback(ctx)`** becomes `defer func() { _ = tx.Rollback(ctx) }()` — rollback after a successful commit returns `pgx.ErrTxDone`, and explicit discard is the canonical pattern.
+- **Best-effort cleanup in tests** uses `_, _ = db.Exec(ctx, ...)`.
+
+### Errorlint patterns
+
+Error comparisons use `errors.Is` (not `==`); error wrapping uses `%w` (not `%v`). Both are enforced.
+
+### Suppressing a finding
+
+Suppressions land at the call site and name both the rule and the rationale, so a future reader can tell whether the suppression is still load-bearing:
+
+```go
+//nolint:rowserrcheck // rows.Err() is the caller's responsibility; see HandleRowsResult.
+```
+
+```go
+// #nosec G304 -- user-supplied config path by design
 ```
 
 ## Gitignore
@@ -91,6 +124,7 @@ cp path/to/go-blueprint/templates/Makefile .
 cp path/to/go-blueprint/templates/docker-compose.yml .
 cp path/to/go-blueprint/templates/skimatik.yaml .
 cp path/to/go-blueprint/templates/.golangci.yml .
+cp path/to/go-blueprint/templates/.custom-gcl.yml .
 cp path/to/go-blueprint/templates/.env.example .
 cp path/to/go-blueprint/templates/.gitignore .
 cp path/to/go-blueprint/templates/lefthook.yml .
@@ -102,7 +136,7 @@ sed -i '' 's/myapp/yourapp/g' Makefile docker-compose.yml skimatik.yaml .env.exa
 cp .env.example .env
 # Fill in DATABASE_URL and any other secrets
 
-make setup   # install-tools + generate (requires dev DB)
+make setup   # install dev tools + generate (requires dev DB)
 lefthook install
 ```
 
@@ -113,8 +147,7 @@ make db-up           # start dev Postgres
 make run             # go run cmd/myapp/main.go serve
 make test            # fast unit tests, skip integration
 make test-integration # full suite against the test container
-make lint
-make verify          # blueprint-vet conformance checks
+make lint            # fmt + custom-gcl (golangci-lint + blueprint-vet plugin) + blueprint-sql-check
 ```
 
 ### Schema Change
