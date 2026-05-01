@@ -63,11 +63,12 @@ Two files drive the lint pipeline:
 make lint   # go fmt → ./bin/custom-gcl run ./... → blueprint-sql-check ./internal/repository/queries
 ```
 
-Three configuration details are non-obvious and worth surfacing:
+Four configuration details are non-obvious and worth surfacing:
 
 - **`rowserrcheck.packages: [github.com/jackc/pgx/v5]`** — the linter's default packages list only covers `database/sql`, so without this teach it about pgx the linter silently no-ops on every pgx-based iteration in the codebase.
 - **Generated code stays excluded.** `internal/repository/generated` is in `linters.exclusions.paths`. Skimatik regenerates the package on every schema change; lint findings there have nowhere to live. (Some skimatik downstreams lint generated code on equal footing — that's a deliberate, opposite tradeoff.)
 - **`blueprint-vet` plugin replaces the standalone binary path.** The same R-1..R-12 rules surface inside `golangci-lint run` instead of needing a separate `make verify` invocation. `blueprint-sql-check` (the SQL-file checker, not Go AST) still runs as a standalone binary from `make lint` because it operates on `.sql` files outside the golangci-lint pipeline.
+- **staticcheck QF1008 is disabled.** It would rewrite `r.ProductsQueries.GetByID(...)` to `r.GetByID(...)` via Go method promotion. In a skimatik wrapper repo, the explicit `XQueries.` qualifier documents which calls are generated passthroughs vs. domain methods added on the wrapper; the promoted form loses that signal.
 
 Three blueprint-specific gates carry over from the previous config:
 
