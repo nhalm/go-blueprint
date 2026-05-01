@@ -9,7 +9,7 @@ This README is operational — how to run, debug, and extend the smoke setup. De
 ## TL;DR
 
 ```bash
-make smoke         # full bootstrap + lint + verify + integration tests
+make smoke         # full bootstrap + lint (custom-gcl + plugin + sql-check) + integration
 make smoke-clean   # tear down docker, wipe build/smoke
 ```
 
@@ -20,17 +20,16 @@ The maintainer Makefile at the repo root orchestrates the flow. From a clean sta
 1. **Extract** canonical docs to `build/smoke/` via `go run ./scripts/extract-docs --docs EXAMPLE.md,ARCHITECTURE.md,CONFIG.md,DATABASE.md,ERRORS.md,API.md`. Every fenced code block annotated with `{file=PATH}` is written to its declared path; multiple blocks for the same file are concatenated in deterministic order. Module-path placeholder `github.com/yourorg/myapp` is rewritten to the smoke target (`github.com/example/smoketest`).
 2. **Merge** `templates/*` into `build/smoke/` (Makefile, docker-compose.yml, .golangci.yml, .env.example, etc.) and render `examples/_smoke-fixtures/go.mod.tmpl` to `go.mod`.
 3. **Seed** `.env` from `.env.example` so `viper.ReadInConfig` finds a config file.
-4. **Install tools** (`make install-tools` from the consumer Makefile): skimatik v2, golangci-lint v2, blueprint-vet, mockgen, goimports, lefthook. Plus the standalone `migrate` CLI (smoke-only — bootstraps before `cmd/myapp` can compile).
+4. **Install tools** (`make install-tools` from the consumer Makefile): skimatik v2, swag, mockgen, goimports, lefthook. golangci-lint and blueprint-sql-check are bootstrapped lazily by `make lint`. Plus the standalone `migrate` CLI (smoke-only — bootstraps before `cmd/myapp` can compile).
 5. **Postgres up** via `docker compose up -d postgres` and wait for `pg_isready`.
 6. **Apply migrations** with the standalone `migrate` CLI directly. We can't use `go run ./cmd/myapp migrate up` here because `cmd/myapp` won't compile until `internal/repository/generated/` exists, which only happens after skimatik runs against an already-migrated schema. Hence the standalone migrate.
 7. **`skimatik generate`** — produces `internal/repository/generated/`. Now everything compiles.
 8. **`go mod tidy`** twice. The first pass resolves blueprint deps. After `go generate ./...` materializes `*_interface_mock.go` files (which import `go.uber.org/mock/gomock`), the second pass picks up that import.
 9. **`goimports -w .`** — markdown blocks use spaces; Go expects tabs. The extractor doesn't normalize, so a one-pass goimports brings extracted files into compliance.
 10. **`go build ./...`** — full compile.
-11. **`make lint`** — golangci-lint with the pinned v2 config in `templates/.golangci.yml`.
-12. **`make verify`** — `blueprint-vet` (excluding `internal/repository/generated/`) + `blueprint-sql-check`.
-13. **`make migrate-up`** via `cmd/myapp` — re-runs the migrate command, this time through the compiled binary, to verify that path also works.
-14. **`docker compose down -v`** — clean teardown.
+11. **`make lint`** — `go fmt`, the custom-gcl binary (golangci-lint + blueprint-vet plugin compiled in), and `blueprint-sql-check ./internal/repository/queries`. The first run builds `./bin/custom-gcl` from `.custom-gcl.yml`; subsequent runs reuse it via the file-target dep.
+12. **`make migrate-up`** via `cmd/myapp` — re-runs the migrate command, this time through the compiled binary, to verify that path also works.
+13. **`docker compose down -v`** — clean teardown.
 
 If every step succeeds the script prints `✔ Smoke test green.` and exits 0.
 
@@ -73,7 +72,7 @@ Conventions inside extracted blocks:
 | `not enough arguments in call to ...; want (...,*pgxkit.DB,...)` | Extracted code is using the v2 per-method-executor pattern but skimatik installed is < v2. Check `templates/Makefile`'s `install-tools` points at `github.com/nhalm/skimatik/v2/cmd/skimatik@latest`. |
 | `you are using a configuration file for golangci-lint v2 with golangci-lint v1` | `install-tools` is grabbing v1 of golangci-lint. The v2 path is `github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`. |
 | `package-comments: should have a package comment` (revive) | A package's primary file is missing `// Package X …`. Add one to the canonical block in the source doc. |
-| `blueprint-vet: use canonlog instead of fmt.Sprintf` on `internal/repository/generated/*` | `make verify` is running over generated code. Verify `templates/Makefile`'s `verify` target filters with `go list ./... | grep -v /repository/generated`. |
+| `blueprint-vet: use canonlog instead of fmt.Sprintf` on `internal/repository/generated/*` | The blueprint-vet plugin is firing on generated code. Verify `templates/.golangci.yml` keeps `internal/repository/generated` in `linters.exclusions.paths`. |
 | `failed to read config file: open .env: no such file or directory` | Smoke didn't seed `.env`. The maintainer Makefile copies `.env.example` to `.env` before installing tools — make sure that step ran. Or, if it ran but the consumer-facing `LoadLogging` doesn't tolerate a missing file, the docs need fixing (`fs.ErrNotExist` check alongside `viper.ConfigFileNotFoundError`). |
 | `cannot find package github.com/example/smoketest/internal/repository/generated` | skimatik didn't run, or its output went somewhere else. Check `templates/skimatik.yaml` `output.directory: "./internal/repository/generated"`. |
 | `unknown revision vX.Y.Z` for some lib in `go mod tidy` | Pin in `examples/_smoke-fixtures/go.mod.tmpl` is wrong. Run `go list -m -versions <module>` to find a real version. |

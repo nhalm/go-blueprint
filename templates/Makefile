@@ -1,4 +1,4 @@
-.PHONY: help setup build run test test-integration test-db-up test-db-down test-db-migrate lint clean db-up db-down migrate-up migrate-down generate swagger
+.PHONY: help setup install-tools build run test test-integration test-db-up test-db-down test-db-migrate lint clean db-up db-down migrate-up migrate-down generate swagger
 
 GOLANGCI_LINT_VERSION ?= v2.11.4
 BLUEPRINT_VET_VERSION ?= v0.2.0
@@ -14,6 +14,7 @@ TEST_DATABASE_URL ?= postgres://$(TEST_DB_USER):$(TEST_DB_PASS)@localhost:$(TEST
 help:
 	@echo "Available targets:"
 	@echo "  setup            - Install dev tools and generate code"
+	@echo "  install-tools    - Install dev tools without running generate"
 	@echo "  build            - Build the application"
 	@echo "  run              - Run in development mode"
 	@echo "  test             - Run unit tests (skips integration)"
@@ -30,14 +31,17 @@ help:
 	@echo "  swagger          - Generate OpenAPI docs"
 	@echo "  clean            - Remove build artifacts"
 
-setup:
+setup: install-tools generate
+	@echo "Setup complete! Run 'make run' to start."
+
+# golangci-lint and blueprint-sql-check are bootstrapped on demand by `make
+# lint`, so they're intentionally absent from this list.
+install-tools:
 	@go install github.com/nhalm/skimatik/v2/cmd/skimatik@latest
 	@go install github.com/swaggo/swag/cmd/swag@latest
 	@go install go.uber.org/mock/mockgen@latest
 	@go install golang.org/x/tools/cmd/goimports@latest
 	@go install github.com/evilmartians/lefthook@latest
-	@$(MAKE) generate
-	@echo "Setup complete! Run 'make run' to start."
 
 build:
 	@go build -o bin/myapp ./cmd/myapp
