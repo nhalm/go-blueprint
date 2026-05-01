@@ -1,5 +1,12 @@
 # Go Application Blueprint
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/nhalm/go-blueprint.svg)](https://pkg.go.dev/github.com/nhalm/go-blueprint)
+[![Go Report Card](https://goreportcard.com/badge/github.com/nhalm/go-blueprint)](https://goreportcard.com/report/github.com/nhalm/go-blueprint)
+[![CI](https://github.com/nhalm/go-blueprint/actions/workflows/validate-templates.yml/badge.svg?branch=main)](https://github.com/nhalm/go-blueprint/actions/workflows/validate-templates.yml)
+[![Release](https://img.shields.io/github/v/release/nhalm/go-blueprint?display_name=tag&sort=semver)](https://github.com/nhalm/go-blueprint/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/nhalm/go-blueprint)](https://github.com/nhalm/go-blueprint/blob/main/go.mod)
+[![License](https://img.shields.io/github/license/nhalm/go-blueprint)](LICENSE)
+
 A **documentation blueprint** for building Go backend services with clean architecture, database-first code generation, and the [chikit](https://github.com/nhalm/chikit) / [canonlog](https://github.com/nhalm/canonlog) / [pgxkit](https://github.com/nhalm/pgxkit) / [skimatik](https://github.com/nhalm/skimatik) stack.
 
 Every pattern is demonstrated with complete code examples inline in the docs.
