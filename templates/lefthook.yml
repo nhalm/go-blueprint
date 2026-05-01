@@ -7,6 +7,23 @@ pre-commit:
     - name: test
       run: make test
 
+commit-msg:
+  jobs:
+    - name: conventional-commits
+      run: |
+        subject=$(head -n1 "{1}")
+        echo "$subject" | grep -qE '^(Merge |Revert |deps\(deps\):)' && exit 0
+        if [ ${#subject} -gt 100 ]; then
+          echo "Commit subject too long (${#subject} > 100 chars): $subject"
+          exit 1
+        fi
+        if ! echo "$subject" | grep -qE '^(feat|fix|chore|docs|refactor|test|perf|ci|build|style|revert)(\([a-z0-9_-]+\))?!?: .+$'; then
+          echo "Commit subject must follow Conventional Commits: type(scope)?: description"
+          echo "Allowed types: feat fix chore docs refactor test perf ci build style revert"
+          echo "Got: $subject"
+          exit 1
+        fi
+
 pre-push:
   jobs:
     - name: integration

@@ -6,13 +6,32 @@ The [`templates/`](templates/) directory contains copy-ready versions of every c
 
 ## Git Hooks — Lefthook
 
-See [`templates/lefthook.yml`](templates/lefthook.yml). Pre-commit runs `lint` and `test` in parallel; pre-push runs `test-integration`. `make lint` already covers formatting (`go fmt`), the strict-but-bug-class linter set, and `blueprint-sql-check`, so the hook stays a single target.
+See [`templates/lefthook.yml`](templates/lefthook.yml). Pre-commit runs `lint` and `test` in parallel; commit-msg validates the commit subject against Conventional Commits; pre-push runs `test-integration`. `make lint` already covers formatting (`go fmt`), the strict-but-bug-class linter set, and `blueprint-sql-check`, so that hook stays a single target.
 
 `lefthook` is installed by `make setup`. After copying the template, activate the hooks once:
 
 ```bash
 lefthook install
 ```
+
+### Commit messages — Conventional Commits
+
+The `commit-msg` hook enforces Conventional Commits format on the subject line via a small inline regex. No extra toolchain is required — the check runs in bash through lefthook itself.
+
+- **Allowed types**: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `ci`, `build`, `style`, `revert`
+- **Format**: `type(scope)?!?: description`
+- **Subject length cap**: 100 characters
+- **Bypass**: subjects starting with `Merge `, `Revert `, or `deps(deps):` (Dependabot) skip validation
+
+Examples that pass:
+
+```
+feat: add product list endpoint
+fix(repository): handle nil row scan
+chore!: drop legacy migrate path
+```
+
+The regex deliberately covers only the subject line — body and footer rules (line wrap, `BREAKING CHANGE:` footer parsing, scope enums) are not enforced. Teams that need the full Conventional Commits ruleset typically already have a Node toolchain available and reach for `@commitlint/cli` directly; for a Go-only service, the lefthook regex is the right ergonomic floor — zero new dependencies, catches the common errors (typo'd type, missing colon, runaway-long subject).
 
 ## Docker Compose — Dev Database
 
